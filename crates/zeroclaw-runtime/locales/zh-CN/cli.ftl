@@ -693,6 +693,7 @@ cli-quickstart-plugins-no-integrity-hash = 已拒绝 {$name}：其注册表条�
 cli-quickstart-plugins-not-a-tool = 已跳过 {$name}：其清单不提供任何工具，而 Quickstart 只安装工具插件。未安装任何内容。
 cli-quickstart-plugins-failed = 未安装 {$name}：{$error}
 cli-quickstart-plugins-load-check-failed = 未安装 {$name}：它无法在此主机上加载：{$error}。如果您接受一个会在启动时被跳过的插件，可以用以下命令强制安装：{$command}
+cli-quickstart-plugins-rollback-failed = 无法配置 {$name}：{$error}。撤销其安装也失败了（{$rollback_error}），因此它仍处于已安装状态。请用以下命令删除它：{$command}
 cli-quickstart-plugins-about-name = 插件 {$name} {$version}
 cli-quickstart-plugins-about-author = 作者：{$author}
 cli-quickstart-plugins-about-description = 描述：{$description}

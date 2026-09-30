@@ -143,7 +143,10 @@ plugins one at a time, through the pipeline `zeroclaw plugin install` uses:
    asking whether to install the plugin without them.
 6. It publishes the package and seeds its config entry in the same transaction
    `zeroclaw plugin install` uses, then saves the settings the way
-   `zeroclaw config set` does.
+   `zeroclaw config set` does. If seeding the entry fails, the transaction
+   removes the package again. If that removal fails too, Quickstart says the
+   plugin is still installed and prints the `zeroclaw plugin remove` command
+   for it.
 
 Values you type for settings that are not marked `x-secret` are echoed at the
 prompt, and a default from the schema is prefilled there. Setting values are

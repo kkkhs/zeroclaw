@@ -1235,6 +1235,7 @@ mod tests {
         );
         let install_anyway =
             "zeroclaw --config-dir '/srv/zc' plugin install weather-tool --no-verify";
+        let remove = "zeroclaw --config-dir '/srv/zc' plugin remove weather-tool";
         // A printed command that creates a missing row grants nothing: the
         // declared destinations are granted by a separate command.
         let create_later = format!(
@@ -1246,7 +1247,7 @@ mod tests {
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 32] = [
+        let cases: [QuickstartPluginCase<'_>; 33] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1275,6 +1276,25 @@ mod tests {
                     ("command", install_anyway),
                 ],
                 &["failed to load WASM component", install_anyway],
+            ),
+            // A package whose install could not be undone is still installed:
+            // the line says why it could not be configured, why undoing that
+            // failed, and gives the removal command addressed to the
+            // configuration Quickstart wrote.
+            (
+                "cli-quickstart-plugins-rollback-failed",
+                &[
+                    ("name", "weather-tool"),
+                    ("error", "config file is read-only"),
+                    ("rollback_error", "Permission denied (os error 13)"),
+                    ("command", remove),
+                ],
+                &[
+                    "weather-tool",
+                    "config file is read-only",
+                    "Permission denied (os error 13)",
+                    remove,
+                ],
             ),
             // Quickstart has no `--registry` flag; the default registry's
             // missing index names the environment variable that picks another.
@@ -1503,7 +1523,7 @@ mod tests {
         // catalogue and interpolates exactly the arguments English does. Each
         // argument is a distinct sentinel, so a catalogue that drops or
         // renames a placeholder fails here by name.
-        const SENTINELS: [(&str, &str); 18] = [
+        const SENTINELS: [(&str, &str); 19] = [
             ("alias", "@@alias@@"),
             ("author", "@@author@@"),
             ("command", "@@command@@"),
@@ -1519,6 +1539,7 @@ mod tests {
             ("names", "@@names@@"),
             ("path", "@@path@@"),
             ("registry_version", "@@registry_version@@"),
+            ("rollback_error", "@@rollback_error@@"),
             ("settings", "@@settings@@"),
             ("summary", "@@summary@@"),
             ("version", "@@version@@"),

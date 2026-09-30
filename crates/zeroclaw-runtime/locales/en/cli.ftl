@@ -785,6 +785,7 @@ cli-quickstart-plugins-no-integrity-hash = Refused {$name}: its registry entry h
 cli-quickstart-plugins-not-a-tool = Skipped {$name}: its manifest provides no tool, and Quickstart installs tool plugins only. Nothing was installed.
 cli-quickstart-plugins-failed = {$name} was not installed: {$error}
 cli-quickstart-plugins-load-check-failed = {$name} was not installed: it does not load against this host: {$error}. If you accept a plugin that is skipped at startup, install it anyway with: {$command}
+cli-quickstart-plugins-rollback-failed = {$name} could not be configured: {$error}. Undoing its install failed too ({$rollback_error}), so it is still installed. Remove it with: {$command}
 cli-quickstart-plugins-about-name = Plugin {$name} {$version}
 cli-quickstart-plugins-about-author = Author: {$author}
 cli-quickstart-plugins-about-description = Description: {$description}

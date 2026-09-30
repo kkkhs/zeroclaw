@@ -911,25 +911,33 @@ impl PhaseLog {
 
     fn outcome(&self, outcome: &PackageOutcome) {
         let attrs = self.outcome_attrs(outcome);
-        if matches!(
-            outcome,
-            PackageOutcome::Failed { .. } | PackageOutcome::RollbackFailed { .. }
-        ) {
-            ::zeroclaw_log::record!(
+        match outcome {
+            PackageOutcome::Failed { .. } => ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
                     .with_outcome(::zeroclaw_log::EventOutcome::Failure)
                     .with_attrs(attrs),
                 "quickstart plugins: package not installed"
-            );
-        } else {
-            ::zeroclaw_log::record!(
+            ),
+            // Its install failed and could not be undone, so it stays.
+            PackageOutcome::RollbackFailed { .. } => ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(attrs),
+                "quickstart plugins: package left installed after its install failed"
+            ),
+            PackageOutcome::Installed { .. }
+            | PackageOutcome::AlreadyInstalled { .. }
+            | PackageOutcome::AlreadyInstalledSkipped { .. }
+            | PackageOutcome::Skipped { .. }
+            | PackageOutcome::Refused { .. } => ::zeroclaw_log::record!(
                 INFO,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Complete)
                     .with_outcome(::zeroclaw_log::EventOutcome::Success)
                     .with_attrs(attrs),
                 "quickstart plugins: package handled"
-            );
+            ),
         }
     }
 
@@ -1217,25 +1225,9 @@ async fn install_one<P: QuickstartPrompter>(
     .await;
     drop(downloaded);
     if let Err(error) = published {
-        let outcome = failure(
-            prompter,
-            &name,
-            FailureStage::Publish,
-            &format!("{error:#}"),
-        );
-        // The transaction rolls its own package back. When that failed too,
-        // the package stays on disk although the host no longer lists it;
-        // the error says so in a typed layer, never only in its text.
-        return Ok(
-            if error
-                .downcast_ref::<crate::PublishRollbackFailed>()
-                .is_some()
-            {
-                PackageOutcome::RollbackFailed { name }
-            } else {
-                outcome
-            },
-        );
+        let (outcome, line) = publish_failure(config, &name, &error);
+        prompter.say(&indented(&line));
+        return Ok(outcome);
     }
     *config = staged;
     prompter.say(&indented(&qta(
@@ -1374,7 +1366,7 @@ async fn keep_installed<P: QuickstartPrompter>(
 /// Report a package that failed at `stage` and record it. Nothing durable
 /// happened for it: every stage before the publish writes nothing, and the
 /// publish rolls its own package back. A publish whose rollback failed too is
-/// the one exception, and its caller records it as such.
+/// the one exception, which [`publish_failure`] reports.
 fn failure<P: QuickstartPrompter>(
     prompter: &mut P,
     name: &str,
@@ -1392,6 +1384,63 @@ fn failure<P: QuickstartPrompter>(
         name: name.to_string(),
         stage,
     }
+}
+
+/// The outcome of a publish-and-seed transaction that failed for the package
+/// `name`, and the line that reports it.
+///
+/// The transaction rolls its own package back, so the package was not
+/// installed. When that rollback failed too, the error says so in a typed
+/// layer, never only in its text: the package stays in the plugins directory
+/// although the host no longer lists it. The line then says why the package
+/// could not be configured, that it is still installed, and the command that
+/// removes it, addressed to this configuration. The typed layer's own text,
+/// which `plugin install` prints, is left out: its removal command names no
+/// configuration directory.
+fn publish_failure(config: &Config, name: &str, error: &anyhow::Error) -> (PackageOutcome, String) {
+    let display_name = terminal_safe(name);
+    let Some(rollback) = error.downcast_ref::<crate::PublishRollbackFailed>() else {
+        return (
+            PackageOutcome::Failed {
+                name: name.to_string(),
+                stage: FailureStage::Publish,
+            },
+            qta(
+                "cli-quickstart-plugins-failed",
+                &[
+                    ("name", &display_name),
+                    ("error", &terminal_safe_detail(&format!("{error:#}"))),
+                ],
+            ),
+        );
+    };
+    let layer = rollback.to_string();
+    let cause = error
+        .chain()
+        .map(ToString::to_string)
+        .filter(|text| *text != layer)
+        .collect::<Vec<_>>()
+        .join(": ");
+    // An installed package name is lowercase letters, digits, `.`, `-` and
+    // `_`, which every supported shell passes as written.
+    let command = zeroclaw_command(config, &format!("plugin remove {}", rollback.package));
+    (
+        PackageOutcome::RollbackFailed {
+            name: name.to_string(),
+        },
+        qta(
+            "cli-quickstart-plugins-rollback-failed",
+            &[
+                ("name", &display_name),
+                ("error", &terminal_safe_detail(&cause)),
+                (
+                    "rollback_error",
+                    &terminal_safe_detail(&rollback.rollback_error),
+                ),
+                ("command", &command),
+            ],
+        ),
+    )
 }
 
 /// What the package is and what it asks for, printed before any question
@@ -4359,6 +4408,84 @@ type = "string"
             "{stranded}"
         );
         assert!(!stranded.contains("plugin remove broken"), "{stranded}");
+    }
+
+    #[test]
+    fn a_publish_whose_rollback_failed_is_reported_installed_with_its_removal_command() {
+        let workspace = Workspace::new();
+        let config = &workspace.config;
+        let remove = zeroclaw_command(config, "plugin remove stuck");
+        assert!(remove.contains("--config-dir"), "{remove}");
+        let rollback = crate::PublishRollbackFailed {
+            package: "stuck".to_string(),
+            rollback_error: "Permission denied (os error 13)".to_string(),
+        };
+        let layer = rollback.to_string();
+        let stranded = anyhow::Error::msg("config file is read-only").context(rollback);
+
+        let (outcome, line) = publish_failure(config, "stuck", &stranded);
+
+        assert_eq!(
+            outcome,
+            PackageOutcome::RollbackFailed {
+                name: "stuck".to_string()
+            }
+        );
+        assert_eq!(
+            line,
+            qta(
+                "cli-quickstart-plugins-rollback-failed",
+                &[
+                    ("name", "stuck"),
+                    ("error", "config file is read-only"),
+                    ("rollback_error", "Permission denied (os error 13)"),
+                    ("command", &remove),
+                ]
+            ),
+            "the package is still installed, and the line says so with the command \
+             that removes it from this configuration"
+        );
+        let not_installed = qta(
+            "cli-quickstart-plugins-failed",
+            &[("name", "stuck"), ("error", "<error>")],
+        );
+        let (not_installed_prefix, _) = not_installed
+            .split_once("<error>")
+            .expect("the line carries the error");
+        assert!(
+            !line.starts_with(not_installed_prefix),
+            "a package left on disk is never reported as not installed: {line}"
+        );
+        assert!(
+            !line.contains(&layer),
+            "the install command's own text, whose removal command names no \
+             configuration directory, is left out: {line}"
+        );
+
+        // A publish the transaction rolled back installed nothing.
+        let rolled_back = anyhow::Error::msg("config file is read-only")
+            .context("the plugin package 'broken' was rolled back");
+        let (outcome, line) = publish_failure(config, "broken", &rolled_back);
+        assert_eq!(
+            outcome,
+            PackageOutcome::Failed {
+                name: "broken".to_string(),
+                stage: FailureStage::Publish,
+            }
+        );
+        assert_eq!(
+            line,
+            qta(
+                "cli-quickstart-plugins-failed",
+                &[
+                    ("name", "broken"),
+                    (
+                        "error",
+                        "the plugin package 'broken' was rolled back: config file is read-only"
+                    ),
+                ]
+            )
+        );
     }
 
     async fn serve_index(server: &MockServer, response: ResponseTemplate, hits: u64) {

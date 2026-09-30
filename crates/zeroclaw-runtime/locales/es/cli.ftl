@@ -694,6 +694,7 @@ cli-quickstart-plugins-no-integrity-hash = Se rechazó {$name}: su entrada del r
 cli-quickstart-plugins-not-a-tool = Se omitió {$name}: su manifiesto no proporciona ninguna herramienta, y Quickstart solo instala complementos de herramienta. No se instaló nada.
 cli-quickstart-plugins-failed = {$name} no se instaló: {$error}
 cli-quickstart-plugins-load-check-failed = {$name} no se instaló: no se carga en este host: {$error}. Si aceptas un complemento que se omite al iniciar, instálalo de todos modos con: {$command}
+cli-quickstart-plugins-rollback-failed = {$name} no se pudo configurar: {$error}. Deshacer su instalación también falló ({$rollback_error}), así que sigue instalado. Quítalo con: {$command}
 cli-quickstart-plugins-about-name = Complemento {$name} {$version}
 cli-quickstart-plugins-about-author = Autor: {$author}
 cli-quickstart-plugins-about-description = Descripción: {$description}

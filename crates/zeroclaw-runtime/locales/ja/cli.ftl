@@ -692,6 +692,7 @@ cli-quickstart-plugins-no-integrity-hash = {$name} を拒否しました: レジ
 cli-quickstart-plugins-not-a-tool = {$name} をスキップしました: マニフェストがツールを提供しておらず、クイックスタートはツールプラグインのみをインストールします。何もインストールしていません。
 cli-quickstart-plugins-failed = {$name} はインストールされませんでした: {$error}
 cli-quickstart-plugins-load-check-failed = {$name} はインストールされませんでした: このホストで読み込めません: {$error}。起動時にスキップされるプラグインでも構わない場合は、次のコマンドで強制的にインストールできます: {$command}
+cli-quickstart-plugins-rollback-failed = {$name} を構成できませんでした: {$error}。インストールの取り消しにも失敗したため ({$rollback_error})、まだインストールされたままです。次のコマンドで削除してください: {$command}
 cli-quickstart-plugins-about-name = プラグイン {$name} {$version}
 cli-quickstart-plugins-about-author = 作成者: {$author}
 cli-quickstart-plugins-about-description = 説明: {$description}

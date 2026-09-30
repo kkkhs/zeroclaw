@@ -697,6 +697,7 @@ cli-quickstart-plugins-no-integrity-hash = {$name} refusé : son entrée de regi
 cli-quickstart-plugins-not-a-tool = {$name} ignoré : son manifeste ne fournit aucun outil, et Quickstart n'installe que des plugins d'outil. Rien n'a été installé.
 cli-quickstart-plugins-failed = {$name} n'a pas été installé : {$error}
 cli-quickstart-plugins-load-check-failed = {$name} n'a pas été installé : il ne se charge pas sur cet hôte : {$error}. Si vous acceptez un plugin ignoré au démarrage, installez-le quand même avec : {$command}
+cli-quickstart-plugins-rollback-failed = {$name} n'a pas pu être configuré : {$error}. L'annulation de son installation a aussi échoué ({$rollback_error}), il est donc toujours installé. Supprimez-le avec : {$command}
 cli-quickstart-plugins-about-name = Plugin {$name} {$version}
 cli-quickstart-plugins-about-author = Auteur : {$author}
 cli-quickstart-plugins-about-description = Description : {$description}
