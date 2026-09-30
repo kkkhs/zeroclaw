@@ -291,13 +291,21 @@ pub(crate) struct ConfigFields {
     /// Terminal-safe names of properties that are not portable plugin keys or
     /// whose type does not resolve; they are reported, never prompted.
     pub(crate) unsupported: Vec<String>,
+    /// Terminal-safe names in the schema's root `required` list that no field
+    /// prompts for: a property in `unsupported`, or a name the root
+    /// `properties` map does not declare. While any is listed, no answers to
+    /// the prompts can satisfy the schema. Sorted, without duplicates.
+    pub(crate) required_unprompted: Vec<String>,
 }
 
 /// Map a manifest `config_schema` to the fields Quickstart prompts for.
 ///
 /// Only root `properties` whose names pass the portable plugin key grammar
-/// are prompted: those are the names `config set
-/// plugins.entries.<key>.config.<name>` and the secret service agree on.
+/// are prompted. Those are the names Quickstart prints a `config set
+/// plugins.entries.<key>.config.<name>` command for, since they are safe to
+/// show on a terminal and to paste into a shell, and the only names a secret
+/// property can have. `config set` itself accepts any declared name the
+/// operator quotes.
 #[must_use]
 pub(crate) fn config_fields(schema: &Value) -> ConfigFields {
     let required: BTreeSet<&str> = schema
@@ -306,9 +314,11 @@ pub(crate) fn config_fields(schema: &Value) -> ConfigFields {
         .map(|names| names.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
     let mut out = ConfigFields::default();
-    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
-        return out;
-    };
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten();
     for (name, property) in properties {
         let resolved = resolve_ref(schema, property);
         let kind = resolved
@@ -357,6 +367,13 @@ pub(crate) fn config_fields(schema: &Value) -> ConfigFields {
             .then_with(|| left.key.cmp(&right.key))
     });
     out.unsupported.sort();
+    let prompted: BTreeSet<&str> = out.fields.iter().map(|field| field.key.as_str()).collect();
+    let required_unprompted: BTreeSet<String> = required
+        .into_iter()
+        .filter(|name| !prompted.contains(name))
+        .map(terminal_safe)
+        .collect();
+    out.required_unprompted = required_unprompted.into_iter().collect();
     out
 }
 
@@ -466,16 +483,16 @@ pub(crate) fn encode_value(field: &ConfigField, raw: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// The required settings an instance's config row leaves unset that
-/// `config set plugins.entries.<key>.config.<name>` can write, so each one
-/// gets that command.
+/// The required settings an instance's config row leaves unset whose names
+/// are portable plugin keys, so Quickstart prints the `config set
+/// plugins.entries.<key>.config.<name>` command for each one.
 ///
 /// These are the names in the schema's root `required` list that the root
 /// `properties` map declares and that are portable plugin keys. Any other
-/// required name is left out; [`unsettable_required_settings`] lists those.
-/// A name counts as set when the row holds its key, whatever the value; values
-/// are never read here. With no row, every such setting is unset. Sorted,
-/// without duplicates.
+/// required name is left out: [`nonportable_required_settings`] and
+/// [`undeclared_required_settings`] list those. A name counts as set when the
+/// row holds its key, whatever the value; values are never read here. With no
+/// row, every such setting is unset. Sorted, without duplicates.
 ///
 /// This only names what to set. Whether the instance can use its row is the
 /// runtime resolver's decision: a row this reports complete can still hold a
@@ -506,35 +523,67 @@ pub(crate) fn missing_required_settings(
     missing.into_iter().map(str::to_string).collect()
 }
 
-/// The required names an instance's config row lacks that
-/// [`missing_required_settings`] leaves out: a name that is not a portable
-/// plugin key, which no `config set` path addresses, or one the root
-/// `properties` map does not declare, which the resolver refuses whatever its
-/// value. Quickstart names them and prints no command for them. Publisher
-/// text, so each is made terminal-safe. Sorted, without duplicates.
+/// The required settings an instance's config row leaves unset that the root
+/// `properties` map declares under a name outside the portable plugin key
+/// grammar.
+///
+/// `config set` writes such a setting when the operator quotes its path, and
+/// the resolver reads it like any other. Quickstart prints commands only for
+/// portable names, the ones that are safe to show on a terminal and to paste
+/// into a shell, so it names these without a command: the operator sets them
+/// in the config file or with a `config set` command they quote themselves.
+/// Publisher text, so each is made terminal-safe. Sorted, without duplicates.
 #[must_use]
-pub(crate) fn unsettable_required_settings(
+pub(crate) fn nonportable_required_settings(
     manifest: &PluginManifest,
     configured: Option<&HashMap<String, String>>,
 ) -> Vec<String> {
     let Some(schema) = manifest.config_schema.as_ref() else {
         return Vec::new();
     };
-    let properties = schema.get("properties").and_then(Value::as_object);
-    let unsettable: BTreeSet<String> = schema
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let nonportable: BTreeSet<String> = schema
         .get("required")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
         .filter(|name| {
-            let settable = properties.is_some_and(|properties| properties.contains_key(*name))
-                && zeroclaw_api::plugin_key::is_valid_portable_plugin_key(name);
-            !settable && configured.is_none_or(|row| !row.contains_key(*name))
+            properties.contains_key(*name)
+                && !zeroclaw_api::plugin_key::is_valid_portable_plugin_key(name)
+                && configured.is_none_or(|row| !row.contains_key(*name))
         })
         .map(terminal_safe)
         .collect();
-    unsettable.into_iter().collect()
+    nonportable.into_iter().collect()
+}
+
+/// The names the schema's root `required` list holds that its root
+/// `properties` map does not declare.
+///
+/// The resolver refuses a row holding a name the map does not declare, and
+/// the schema refuses a row without a required one, so no row satisfies the
+/// schema and nothing the operator sets makes the instance usable. Quickstart
+/// names them without a command. Publisher text, so each is made
+/// terminal-safe. Sorted, without duplicates.
+#[must_use]
+pub(crate) fn undeclared_required_settings(manifest: &PluginManifest) -> Vec<String> {
+    let Some(schema) = manifest.config_schema.as_ref() else {
+        return Vec::new();
+    };
+    let properties = schema.get("properties").and_then(Value::as_object);
+    let undeclared: BTreeSet<String> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|name| !properties.is_some_and(|properties| properties.contains_key(*name)))
+        .map(terminal_safe)
+        .collect();
+    undeclared.into_iter().collect()
 }
 
 /// Snake-case names of a manifest's capabilities, as manifests spell them.
@@ -998,6 +1047,44 @@ mod tests {
     }
 
     #[test]
+    fn schema_fields_name_the_required_settings_no_prompt_asks_for() {
+        assert!(
+            config_fields(&schema()).required_unprompted.is_empty(),
+            "every required property of the fixture is prompted; the unsupported ones \
+             are optional"
+        );
+
+        let mut blocked = schema();
+        blocked["required"] = json!([
+            "zone",
+            "bad key",
+            "mystery",
+            "undeclared",
+            "\u{1b}[31mred",
+            "bad key"
+        ]);
+        let fields = config_fields(&blocked);
+        assert_eq!(
+            fields.required_unprompted,
+            vec!["bad key", "mystery", "red", "undeclared"],
+            "a required name outside the portable grammar, one whose type does not \
+             resolve, and one `properties` does not declare, terminal-safe, once each"
+        );
+        assert!(
+            fields
+                .fields
+                .iter()
+                .any(|field| field.key == "zone" && field.required),
+            "the prompted fields are unchanged"
+        );
+
+        let no_properties = json!({ "type": "object", "required": ["zone"] });
+        let fields = config_fields(&no_properties);
+        assert!(fields.fields.is_empty());
+        assert_eq!(fields.required_unprompted, vec!["zone"]);
+    }
+
+    #[test]
     fn schema_fields_offer_enums_and_booleans_as_choices_with_the_default_first() {
         let fields = config_fields(&schema());
         let field = |key: &str| {
@@ -1200,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_required_settings_name_only_settings_config_set_can_write() {
+    fn missing_required_settings_name_only_declared_portable_settings() {
         let manifest = manifest_with(Some(json!({
             "type": "object",
             "additionalProperties": false,
@@ -1219,28 +1306,60 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unsettable_required_settings_name_the_rest_of_the_required_list() {
-        let manifest = manifest_with(Some(json!({
+    /// A schema whose required list holds a portable name, two declared names
+    /// outside the portable grammar, one twice, and two names `properties`
+    /// does not declare, one of them hostile to a terminal.
+    fn mixed_required_manifest() -> PluginManifest {
+        manifest_with(Some(json!({
             "type": "object",
             "additionalProperties": false,
-            "required": ["zone", "bad key", "undeclared", "bad key", "\u{1b}[31mred"],
+            "required": [
+                "zone", "bad key", "undeclared", "bad key", "\u{1b}[31mred", "proxy/url"
+            ],
             "properties": {
                 "bad key": { "type": "string" },
+                "proxy/url": { "type": "string" },
                 "zone": { "type": "string" }
             }
-        })));
+        })))
+    }
+
+    #[test]
+    fn nonportable_required_settings_name_declared_names_outside_the_grammar() {
+        let manifest = mixed_required_manifest();
         assert_eq!(
-            unsettable_required_settings(&manifest, None),
-            vec!["bad key", "red", "undeclared"],
-            "every required name no command can set, terminal-safe, once each"
+            nonportable_required_settings(&manifest, None),
+            vec!["bad key", "proxy/url"],
+            "every declared required name outside the portable grammar, once each; \
+             portable and undeclared names are left out"
         );
         assert_eq!(
-            unsettable_required_settings(&manifest, Some(&row(&["bad key", "zone"], "x"))),
-            vec!["red", "undeclared"],
+            nonportable_required_settings(&manifest, Some(&row(&["bad key", "zone"], "x"))),
+            vec!["proxy/url"],
             "a name the row holds is not missing"
         );
-        assert!(unsettable_required_settings(&manifest_with(None), None).is_empty());
+        assert!(nonportable_required_settings(&manifest_with(None), None).is_empty());
+    }
+
+    #[test]
+    fn undeclared_required_settings_name_what_the_properties_map_lacks() {
+        let manifest = mixed_required_manifest();
+        assert_eq!(
+            undeclared_required_settings(&manifest),
+            vec!["red", "undeclared"],
+            "every required name `properties` does not declare, terminal-safe"
+        );
+        assert!(undeclared_required_settings(&manifest_with(None)).is_empty());
+        let no_properties = manifest_with(Some(json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["zone"]
+        })));
+        assert_eq!(
+            undeclared_required_settings(&no_properties),
+            vec!["zone"],
+            "with no properties map, nothing required is declared"
+        );
     }
 
     #[test]

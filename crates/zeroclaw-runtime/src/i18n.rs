@@ -1246,7 +1246,7 @@ mod tests {
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 30] = [
+        let cases: [QuickstartPluginCase<'_>; 32] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1336,6 +1336,13 @@ mod tests {
                 &[("name", "weather-tool"), ("keys", "proxy.url")],
                 &["weather-tool", "proxy.url", "`zeroclaw config set`"],
             ),
+            // A required setting no prompt asks for leaves the schema
+            // unsatisfiable, so the line names it before the install choice.
+            (
+                "cli-quickstart-plugins-config-required-unsupported",
+                &[("name", "weather-tool"), ("keys", "proxy url, region")],
+                &["weather-tool", "proxy url, region"],
+            ),
             (
                 "cli-quickstart-plugins-config-defaults-prompt",
                 &[("name", "weather-tool")],
@@ -1419,10 +1426,18 @@ mod tests {
                 &[("name", "weather-tool"), ("keys", "api_key, units")],
                 &["weather-tool", "api_key, units"],
             ),
+            // A required setting outside the portable grammar gets no printed
+            // command; the line says how to set it instead. A required name
+            // the schema does not declare cannot be set at all.
             (
-                "cli-quickstart-plugins-ready-missing-unsettable",
+                "cli-quickstart-plugins-ready-missing-nonportable",
                 &[("name", "weather-tool"), ("keys", "proxy url")],
-                &["weather-tool", "proxy url"],
+                &["weather-tool", "proxy url", "`zeroclaw config set`", "128"],
+            ),
+            (
+                "cli-quickstart-plugins-ready-undeclared-required",
+                &[("name", "weather-tool"), ("keys", "region")],
+                &["weather-tool", "region"],
             ),
             // `config set` resolves only rows that exist, so an instance
             // without the row it is owed gets the command that creates it,

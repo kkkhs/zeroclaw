@@ -134,8 +134,13 @@ plugins one at a time, through the pipeline `zeroclaw plugin install` uses:
    The values are checked against the schema before anything is written; after a
    failed check you get one more try, then Quickstart asks whether to install
    the plugin without them. Pressing Esc at a required setting that is secret
-   or picked from a list skips the plugin. Properties Quickstart cannot prompt
-   for are named so that you can set them later with `zeroclaw config set`.
+   or picked from a list skips the plugin. Quickstart prompts only for
+   properties whose names are in the portable key grammar (up to 128 ASCII
+   letters, digits, `.`, `-` and `_`). It names the others so that you can set
+   them later with `zeroclaw config set`. When a required property is one of
+   them, or a name the schema requires without declaring it, no answers could
+   pass the check, so Quickstart asks for no settings and goes straight to
+   asking whether to install the plugin without them.
 6. It publishes the package and seeds its config entry in the same transaction
    `zeroclaw plugin install` uses, then saves the settings the way
    `zeroclaw config set` does.
@@ -185,15 +190,20 @@ reported active only when its config entry passes the settings check the
 runtime applies on every call. Otherwise, for example when you installed it
 without its required settings, its status shows the reason the check gives,
 names the required settings that are missing, and prints the
-`zeroclaw config set` command that asks for each value. A required setting that
-command cannot write is named without one. A plugin whose config entry is
-missing, for example because you skipped creating it, is not reported active
-either: `zeroclaw config set` only changes entries that exist, so its status
-prints the command that creates the entry instead. That command grants no
-network access; for a plugin that requests `http_client` and declares
-destinations, a separate line gives the command that grants them once the
-entry exists. A plugin with nothing to configure and no network access needs
-no config entry.
+`zeroclaw config set` command that asks for each value. Quickstart prints
+commands only for setting names in the portable key grammar, which are safe to
+show and to paste into a shell. A required setting with any other name is
+named without a command: set it in the config file, or with a
+`zeroclaw config set` command you quote yourself. A required name that the
+plugin's schema does not declare is named too, since no config entry can
+satisfy that schema until the plugin's publisher fixes it. A plugin whose
+config entry is missing, for example because you skipped creating it, is not
+reported active either: `zeroclaw config set` only changes entries that exist,
+so its status prints the command that creates the entry instead. That command
+grants no network access; for a plugin that requests `http_client` and
+declares destinations, a separate line gives the command that grants them once
+the entry exists. A plugin with nothing to configure and no network access
+needs no config entry.
 
 Quickstart writes the config file and never signals a running daemon. A daemon
 that is already running keeps the configuration it loaded, so it uses the new

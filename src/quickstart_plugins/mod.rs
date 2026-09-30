@@ -41,8 +41,8 @@ use model::{
     ActivatedInstance, ActivationInputs, ActivationPreview, ChannelBinding, ChoiceState,
     ConfigField, FailureStage, PackageOutcome, PluginChoice, Refusal, ValueKind,
     activation_preview, capability_names, config_fields, encode_value, field_descriptor,
-    missing_required_settings, permission_names, plugin_choices, terminal_safe,
-    terminal_safe_detail, unsettable_required_settings,
+    missing_required_settings, nonportable_required_settings, permission_names, plugin_choices,
+    terminal_safe, terminal_safe_detail, undeclared_required_settings,
 };
 
 /// Why a prompt produced no answer.
@@ -587,7 +587,9 @@ impl CreatePhase {
 /// resolver accepts the row it reads, under the scope the activation plan
 /// grants it: a row the resolver rejects fails every call. The resolver's
 /// reason is then shown once, followed by the required settings the row
-/// lacks, each with its `config set` command when that command can write it.
+/// lacks, each with its `config set` command when its name is a portable
+/// plugin key, the only names Quickstart prints a command for, and by any
+/// required name the schema does not declare, which no row can satisfy.
 /// An instance whose manifest owes it a row that does not exist gets no
 /// setting command, since `config set` resolves only rows that exist: its line
 /// gives the command that creates the row with no grant, and a manifest that
@@ -626,8 +628,9 @@ fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<Stri
         }
         Ok(InstanceSettings::Rejected {
             instance_key,
-            settable,
-            unsettable,
+            portable,
+            nonportable,
+            undeclared,
             reason,
         }) => {
             lines.push(indented(&qta(
@@ -637,24 +640,30 @@ fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<Stri
                     ("error", &terminal_safe_detail(&reason)),
                 ],
             )));
-            if !settable.is_empty() {
+            if !portable.is_empty() {
                 lines.push(indented(&qta(
                     "cli-quickstart-plugins-ready-missing-settings",
-                    &[("name", &display_name), ("keys", &settable.join(", "))],
+                    &[("name", &display_name), ("keys", &portable.join(", "))],
                 )));
                 // Instance settings are secret, so `config set` asks for each
                 // value with masked input and the command carries none.
-                lines.extend(settable.iter().map(|key| {
+                lines.extend(portable.iter().map(|key| {
                     indented(&indented(&zeroclaw_command(
                         config,
                         &format!("config set {}", setting_path(&instance_key, key)),
                     )))
                 }));
             }
-            if !unsettable.is_empty() {
+            if !nonportable.is_empty() {
                 lines.push(indented(&qta(
-                    "cli-quickstart-plugins-ready-missing-unsettable",
-                    &[("name", &display_name), ("keys", &unsettable.join(", "))],
+                    "cli-quickstart-plugins-ready-missing-nonportable",
+                    &[("name", &display_name), ("keys", &nonportable.join(", "))],
+                )));
+            }
+            if !undeclared.is_empty() {
+                lines.push(indented(&qta(
+                    "cli-quickstart-plugins-ready-undeclared-required",
+                    &[("name", &display_name), ("keys", &undeclared.join(", "))],
                 )));
             }
         }
@@ -688,10 +697,15 @@ enum InstanceSettings {
     /// The resolver rejects the instance's row, so every call fails.
     Rejected {
         instance_key: String,
-        /// Required settings the row lacks that `config set` can write.
-        settable: Vec<String>,
-        /// Every other required name the row lacks, terminal-safe.
-        unsettable: Vec<String>,
+        /// Required settings the row lacks whose names are portable plugin
+        /// keys, each printed with its `config set` command.
+        portable: Vec<String>,
+        /// Required settings the row lacks whose declared names are outside
+        /// the portable grammar, terminal-safe, printed without a command.
+        nonportable: Vec<String>,
+        /// Required names the schema does not declare, terminal-safe: no row
+        /// satisfies the schema while it has any.
+        undeclared: Vec<String>,
         /// The resolver's reason, which names properties and schema paths,
         /// never values.
         reason: String,
@@ -729,8 +743,9 @@ fn instance_settings(
             Ok(_) if row.is_none() => InstanceSettings::AcceptedWithoutRow,
             Ok(_) => InstanceSettings::Accepted,
             Err(error) => InstanceSettings::Rejected {
-                settable: missing_required_settings(manifest, row),
-                unsettable: unsettable_required_settings(manifest, row),
+                portable: missing_required_settings(manifest, row),
+                nonportable: nonportable_required_settings(manifest, row),
+                undeclared: undeclared_required_settings(manifest),
                 reason: error.to_string(),
                 instance_key,
             },
@@ -1515,6 +1530,11 @@ struct CollectedSettings {
 /// manifest schema with the resolver the runtime uses. `None` skips the
 /// package. Values stay in memory until the publish succeeded and are never
 /// printed or logged; only their key names are.
+///
+/// When the schema requires a setting no prompt here asks for, no answers can
+/// satisfy it, so nothing is asked: the operator is told which settings those
+/// are and decides at once whether to install the package without settings,
+/// rather than typing values that could only be thrown away.
 fn collect_settings<P: QuickstartPrompter>(
     manifest: &PluginManifest,
     prompter: &mut P,
@@ -1524,6 +1544,16 @@ fn collect_settings<P: QuickstartPrompter>(
     };
     let fields = config_fields(schema);
     let name = terminal_safe(&manifest.name);
+    if !fields.required_unprompted.is_empty() {
+        prompter.say(&indented(&qta(
+            "cli-quickstart-plugins-config-required-unsupported",
+            &[
+                ("name", &name),
+                ("keys", &fields.required_unprompted.join(", ")),
+            ],
+        )));
+        return install_without_settings(&name, prompter);
+    }
     if !fields.unsupported.is_empty() {
         prompter.say(&indented(&qta(
             "cli-quickstart-plugins-config-unsupported",
@@ -1582,10 +1612,19 @@ fn collect_settings<P: QuickstartPrompter>(
             ))),
         }
     }
+    install_without_settings(&name, prompter)
+}
+
+/// Ask whether to install the package named `name` (terminal-safe) without
+/// its settings, defaulting to no. `None` skips the package.
+fn install_without_settings<P: QuickstartPrompter>(
+    name: &str,
+    prompter: &mut P,
+) -> PromptResult<Option<CollectedSettings>> {
     let proceed = prompter.confirm(
         &qta(
             "cli-quickstart-plugins-config-defaults-prompt",
-            &[("name", &name)],
+            &[("name", name)],
         ),
         false,
     )?;
@@ -3830,9 +3869,10 @@ egress_hosts = ["{unrelated_host}"]
         );
     }
 
-    #[test]
-    fn a_required_setting_no_command_can_write_is_named_without_one() {
-        let manifest = r#"name = "strict-tool"
+    /// A tool whose schema requires a secret with a portable name, a setting
+    /// declared under a name outside the portable grammar, and a name its
+    /// `properties` map does not declare.
+    const STRICT_MANIFEST: &str = r#"name = "strict-tool"
 version = "0.1.0"
 wasm_path = "tool-fixture.wasm"
 capabilities = ["tool"]
@@ -3842,7 +3882,7 @@ permissions = ["config_read"]
 "$schema" = "https://json-schema.org/draft/2020-12/schema"
 type = "object"
 additionalProperties = false
-required = ["api_token", "bad key"]
+required = ["api_token", "bad key", "undeclared"]
 
 [config_schema.properties.api_token]
 type = "string"
@@ -3851,12 +3891,15 @@ x-secret = true
 [config_schema.properties."bad key"]
 type = "string"
 "#;
+
+    #[test]
+    fn a_required_setting_outside_the_portable_grammar_is_named_without_a_command() {
         let mut workspace = Workspace::new();
-        install_with_manifest(&workspace, "strict-tool", manifest);
+        install_with_manifest(&workspace, "strict-tool", STRICT_MANIFEST);
         workspace.config.plugins.enabled = true;
         workspace.config.plugins.auto_discover = true;
-        let key = instance_key_of(manifest);
-        // The one required key a portable path can reach is set.
+        let key = instance_key_of(STRICT_MANIFEST);
+        // The one required setting with a portable name is set.
         workspace
             .config
             .plugins
@@ -3889,17 +3932,66 @@ type = "string"
                 .starts_with(&rejected_prefix("strict-tool"))),
             "{text}"
         );
+        // `config set` writes the setting when its path is quoted; Quickstart
+        // prints commands only for portable names, so it names this one and
+        // says where it is set instead.
         assert!(
             readiness.contains(&indented(&qta(
-                "cli-quickstart-plugins-ready-missing-unsettable",
+                "cli-quickstart-plugins-ready-missing-nonportable",
                 &[("name", "strict-tool"), ("keys", "bad key")]
             ))),
             "the setting is named: {text}"
         );
         assert!(
-            !text.contains("config set"),
-            "no command is printed for a name `config set` cannot write: {text}"
+            readiness.contains(&indented(&qta(
+                "cli-quickstart-plugins-ready-undeclared-required",
+                &[("name", "strict-tool"), ("keys", "undeclared")]
+            ))),
+            "a required name the schema does not declare is named apart: {text}"
         );
+        assert!(
+            !text.contains(&format!("plugins.entries.{key}.config.")),
+            "no command is printed for a name outside the portable grammar: {text}"
+        );
+    }
+
+    #[test]
+    fn a_required_setting_no_prompt_asks_for_goes_straight_to_the_install_choice() {
+        let manifest: PluginManifest =
+            toml::from_str(STRICT_MANIFEST).expect("the manifest parses");
+        let blocking = indented(&qta(
+            "cli-quickstart-plugins-config-required-unsupported",
+            &[("name", "strict-tool"), ("keys", "bad key, undeclared")],
+        ));
+        for install in [true, false] {
+            let mut prompter = ScriptedPrompter::new([Answer::Confirm(Some(install))]);
+
+            let settings = collect_settings(&manifest, &mut prompter).expect("no prompt fails");
+
+            prompter.assert_done();
+            assert!(
+                prompter.fields.is_empty(),
+                "no setting is prompted for, not even the one Quickstart could ask: {:?}",
+                prompter.fields
+            );
+            assert_eq!(
+                prompter.said,
+                vec![blocking.clone()],
+                "the settings no prompt asks for are named first"
+            );
+            assert_eq!(
+                prompter.confirm_defaults,
+                vec![false],
+                "installing without settings is opted into"
+            );
+            match settings {
+                Some(settings) => assert!(
+                    install && settings.values.is_empty(),
+                    "accepting installs the package with no settings"
+                ),
+                None => assert!(!install, "declining skips the package"),
+            }
+        }
     }
 
     #[tokio::test]
