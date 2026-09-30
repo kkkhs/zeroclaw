@@ -727,6 +727,7 @@ cli-quickstart-plugins-activation-tool = ツールプラグイン {$name}
 cli-quickstart-plugins-activation-skill = スキルプラグイン {$name}
 cli-quickstart-plugins-activation-channel = チャンネル plugin.{$alias} (パッケージ {$name})
 cli-quickstart-plugins-activation-others = これにより、今回の実行より前にインストールされたプラグインも有効になります。
+cli-quickstart-plugins-activation-unverified = プラグインディレクトリを読み込めなかったため ({$error})、この一覧には同時に有効になるプラグインが含まれていない可能性があります。
 cli-quickstart-plugins-activation-prompt = 今すぐプラグインを有効化しますか？
 cli-quickstart-plugins-activation-declined = プラグインはインストールされたまま無効です。後で次のコマンドで有効化してください:
 cli-quickstart-plugins-activation-enabled = プラグインの有効化はオンです。

@@ -484,7 +484,9 @@ still apply:
   it lists every tool, skill, and channel plugin those settings would
   activate, including plugins installed earlier, and the question defaults to
   no when that list goes beyond the plugins the run installed or kept. A
-  plugin whose missing row you skipped is not one of them.
+  plugin whose missing row you skipped is not one of them. The list comes
+  from the plugins directory as a daemon would load it; when that directory
+  cannot be read, the question also defaults to no.
 
 Quickstart is stricter than `plugin install` in two respects. It refuses a
 registry entry that carries no `sha256` digest for its archive instead of

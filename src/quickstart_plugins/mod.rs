@@ -1766,6 +1766,14 @@ fn activated_line(instance: &ActivatedInstance) -> String {
 /// Ask once, after every package was handled, whether to turn plugin
 /// activation on, listing every instance that would become active, including
 /// packages installed before this run. Returns whether the flags changed.
+///
+/// The list is what a daemon would load: the plugins directory, discovered
+/// afresh, rather than `host`, the host this run installed through. The two
+/// can differ. A publish whose rollback failed leaves its package on disk
+/// after the host dropped it from its loaded set, and the package activates
+/// at the next start all the same. When the directory cannot be discovered,
+/// the list falls back to `host`, may miss packages, and the answer defaults
+/// to no.
 async fn activation_consent<P: QuickstartPrompter>(
     config: &mut Config,
     host: &PluginHost,
@@ -1773,8 +1781,18 @@ async fn activation_consent<P: QuickstartPrompter>(
     log: &PhaseLog,
     prompter: &mut P,
 ) -> PromptResult<bool> {
-    let installed = host.list_plugins();
-    let bindings = channel_bindings(config, host);
+    let (installed, bindings, undiscovered) = {
+        let discovered = crate::plugin_host_with_configured_security(config);
+        let (listing, undiscovered) = match &discovered {
+            Ok(fresh) => (fresh, None),
+            Err(error) => (host, Some(terminal_safe_detail(&format!("{error:#}")))),
+        };
+        (
+            listing.list_plugins(),
+            channel_bindings(config, listing),
+            undiscovered,
+        )
+    };
     let preview = activation_preview(&ActivationInputs {
         plugins_enabled: config.plugins.enabled,
         auto_discover: config.plugins.auto_discover,
@@ -1808,9 +1826,17 @@ async fn activation_consent<P: QuickstartPrompter>(
         .filter(|outcome| outcome.is_accepted())
         .map(|outcome| outcome.name().to_string())
         .collect();
-    let only_selected = preview.activates_only(&selected);
-    if !only_selected {
-        prompter.say(&qta("cli-quickstart-plugins-activation-others", &[]));
+    // A list that may be incomplete may activate other packages too.
+    let only_selected = undiscovered.is_none() && preview.activates_only(&selected);
+    match &undiscovered {
+        Some(error) => prompter.say(&qta(
+            "cli-quickstart-plugins-activation-unverified",
+            &[("error", error)],
+        )),
+        None if !only_selected => {
+            prompter.say(&qta("cli-quickstart-plugins-activation-others", &[]));
+        }
+        None => {}
     }
     let accepted = prompter.confirm(
         &qta("cli-quickstart-plugins-activation-prompt", &[]),
@@ -3915,6 +3941,116 @@ type = "string"
             "the dormant package is listed: {output}"
         );
         server.verify().await;
+    }
+
+    /// Ask the activation question for a run that installed only the
+    /// fixture, answering no, and return the prompter.
+    async fn ask_activation(workspace: &mut Workspace, host: &PluginHost) -> ScriptedPrompter {
+        let outcomes = [PackageOutcome::Installed {
+            name: FIXTURE_NAME.to_string(),
+        }];
+        let mut prompter = ScriptedPrompter::new([Answer::Confirm(Some(false))]);
+        let changed = Box::pin(activation_consent(
+            &mut workspace.config,
+            host,
+            &outcomes,
+            &PhaseLog::new(),
+            &mut prompter,
+        ))
+        .await
+        .expect("the question is answered");
+        prompter.assert_done();
+        assert!(!changed, "declining changes nothing");
+        prompter
+    }
+
+    #[tokio::test]
+    async fn the_activation_preview_lists_a_package_on_disk_that_the_install_host_dropped() {
+        let mut workspace = Workspace::new();
+        install_without_a_row(&workspace);
+        // The host this run installed the fixture through.
+        let host = crate::plugin_host_with_configured_security(&workspace.config).expect("host");
+
+        // With the host and the plugins directory in step, the list is this
+        // run's package alone, so the answer defaults to yes.
+        let prompter = ask_activation(&mut workspace, &host).await;
+        assert_eq!(prompter.confirm_defaults, vec![true]);
+
+        // A package directory the host does not list, as a publish whose
+        // rollback failed leaves one: the host drops the package from its
+        // loaded set before deleting its directory, and a daemon started
+        // later loads what the directory holds.
+        let stranded = "stranded-tool";
+        install_with_manifest(
+            &workspace,
+            stranded,
+            &format!(
+                "name = \"{stranded}\"\nversion = \"0.1.0\"\n\
+                 wasm_path = \"tool-fixture.wasm\"\ncapabilities = [\"tool\"]\n"
+            ),
+        );
+        assert!(host.manifest(stranded).is_none(), "the host never saw it");
+
+        let prompter = ask_activation(&mut workspace, &host).await;
+
+        let output = prompter.output();
+        assert!(
+            output.contains(&activated_line(&ActivatedInstance::Tool {
+                package: stranded.to_string(),
+            })),
+            "the package on disk is in the preview: {output}"
+        );
+        assert!(
+            output.contains(&qta("cli-quickstart-plugins-activation-others", &[])),
+            "{output}"
+        );
+        assert_eq!(
+            prompter.confirm_defaults,
+            vec![false],
+            "activating a package this run did not install must be opted into"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_activation_preview_the_plugins_directory_cannot_confirm_defaults_to_no() {
+        let mut workspace = Workspace::new();
+        install_without_a_row(&workspace);
+        let host = crate::plugin_host_with_configured_security(&workspace.config).expect("host");
+        // The plugins directory can no longer be listed: its path now names a
+        // regular file.
+        let not_a_directory = workspace.dir.path().join("plugins-file");
+        std::fs::write(&not_a_directory, "").expect("write a regular file");
+        workspace.config.plugins.plugins_dir = not_a_directory.display().to_string();
+        assert!(crate::plugin_host_with_configured_security(&workspace.config).is_err());
+
+        let prompter = ask_activation(&mut workspace, &host).await;
+
+        let output = prompter.output();
+        assert!(
+            output.contains(&activated_line(&ActivatedInstance::Tool {
+                package: FIXTURE_NAME.to_string(),
+            })),
+            "the preview falls back to the install host: {output}"
+        );
+        let unverified = qta(
+            "cli-quickstart-plugins-activation-unverified",
+            &[("error", "<error>")],
+        );
+        let (unverified_prefix, _) = unverified
+            .split_once("<error>")
+            .expect("the line carries the discovery error");
+        assert!(
+            prompter
+                .said
+                .iter()
+                .any(|line| line.starts_with(unverified_prefix)),
+            "the list is said to be possibly incomplete: {output}"
+        );
+        assert_eq!(
+            prompter.confirm_defaults,
+            vec![false],
+            "a preview that may miss packages defaults to no"
+        );
     }
 
     #[tokio::test]

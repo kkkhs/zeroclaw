@@ -167,9 +167,13 @@ whether to turn plugin activation on. First it lists which of those settings
 would change and everything that would become active as a result: every
 installed tool and skill plugin, including plugins installed before this run,
 and, when `plugins.enabled` is off, every enabled `[channels.plugin.<alias>]`
-channel. The answer defaults to yes when the list matches the plugins this run
+channel. The list is read from the plugins directory, as a daemon would load
+it at its next start, so it also names a plugin whose failed install could not
+be undone. The answer defaults to yes when the list matches the plugins this run
 installed or kept, and to no when it would activate anything else, including an
-installed plugin whose missing config entry you chose to skip. Declining leaves
+installed plugin whose missing config entry you chose to skip. If the plugins
+directory cannot be read, Quickstart says the list may be incomplete and the
+answer defaults to no. Declining leaves
 both settings unchanged and prints the `zeroclaw config set` commands that turn
 them on later. When both settings are already on, there is nothing to ask.
 

@@ -729,6 +729,7 @@ cli-quickstart-plugins-activation-tool = complemento de herramienta {$name}
 cli-quickstart-plugins-activation-skill = complemento de skill {$name}
 cli-quickstart-plugins-activation-channel = canal plugin.{$alias} (paquete {$name})
 cli-quickstart-plugins-activation-others = Esto también activa complementos que se instalaron antes de esta ejecución.
+cli-quickstart-plugins-activation-unverified = No se pudo leer el directorio de complementos ({$error}), así que esta lista puede omitir complementos que también se activarían.
 cli-quickstart-plugins-activation-prompt = ¿Activar los complementos ahora?
 cli-quickstart-plugins-activation-declined = Los complementos siguen instalados pero inactivos. Actívalos más adelante con:
 cli-quickstart-plugins-activation-enabled = La activación de complementos está habilitada.

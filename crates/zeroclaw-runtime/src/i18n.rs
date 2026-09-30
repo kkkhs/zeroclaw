@@ -1246,7 +1246,7 @@ mod tests {
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 29] = [
+        let cases: [QuickstartPluginCase<'_>; 30] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1367,6 +1367,13 @@ mod tests {
                 "cli-quickstart-plugins-activation-channel",
                 &[("alias", "ops"), ("name", "chat-bridge")],
                 &["plugin.ops", "chat-bridge"],
+            ),
+            // A preview the plugins directory could not confirm says why, so
+            // its answer defaulting to no is explained.
+            (
+                "cli-quickstart-plugins-activation-unverified",
+                &[("error", "Not a directory (os error 20)")],
+                &["Not a directory (os error 20)"],
             ),
             // Each readiness verdict names the instance key or the config
             // path that holds the instance back.

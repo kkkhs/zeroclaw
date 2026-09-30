@@ -728,6 +728,7 @@ cli-quickstart-plugins-activation-tool = 工具插件 {$name}
 cli-quickstart-plugins-activation-skill = 技能插件 {$name}
 cli-quickstart-plugins-activation-channel = 通道 plugin.{$alias}（软件包 {$name}）
 cli-quickstart-plugins-activation-others = 这也会激活本次运行之前安装的插件。
+cli-quickstart-plugins-activation-unverified = 无法读取插件目录（{$error}），因此此列表可能遗漏同样会被激活的插件。
 cli-quickstart-plugins-activation-prompt = 现在激活插件吗？
 cli-quickstart-plugins-activation-declined = 插件仍已安装但未激活。之后可用以下命令激活：
 cli-quickstart-plugins-activation-enabled = 插件激活已开启。

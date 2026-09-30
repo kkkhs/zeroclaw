@@ -732,6 +732,7 @@ cli-quickstart-plugins-activation-tool = plugin d'outil {$name}
 cli-quickstart-plugins-activation-skill = plugin de compétence {$name}
 cli-quickstart-plugins-activation-channel = canal plugin.{$alias} (paquet {$name})
 cli-quickstart-plugins-activation-others = Cela active aussi des plugins installés avant cette exécution.
+cli-quickstart-plugins-activation-unverified = Le répertoire des plugins n'a pas pu être lu ({$error}) : cette liste peut donc omettre des plugins qui seraient aussi activés.
 cli-quickstart-plugins-activation-prompt = Activer les plugins maintenant ?
 cli-quickstart-plugins-activation-declined = Les plugins restent installés mais inactifs. Activez-les plus tard avec :
 cli-quickstart-plugins-activation-enabled = L'activation des plugins est active.
