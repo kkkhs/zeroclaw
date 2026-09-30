@@ -238,10 +238,7 @@ async fn open_row_with<P: QuickstartPrompter>(
         match registry.fetch_index(registry_url).await {
             Ok(index) => break index,
             Err(error) => {
-                prompter.say(&qta(
-                    "cli-quickstart-plugins-registry-unavailable",
-                    &[("error", &terminal_safe_detail(&format!("{error:#}")))],
-                ));
+                prompter.say(&registry_unavailable_line(&error));
                 let options = [
                     qta("cli-quickstart-plugins-registry-retry", &[]),
                     qta("cli-quickstart-plugins-registry-continue", &[]),
@@ -324,6 +321,26 @@ async fn open_row_with<P: QuickstartPrompter>(
         Ok(None) => Ok(RowExit::Done),
         Err(PromptError::Interrupted) => Ok(RowExit::Interrupted),
         Err(PromptError::Failed(error)) => Err(error),
+    }
+}
+
+/// Why the registry index could not be fetched, in Quickstart's terms.
+///
+/// The default registry's "not populated yet" error names the `--registry`
+/// flag of `plugin install` and `plugin search`, which Quickstart does not
+/// have, so that case gets its own line naming the environment variable that
+/// picks another registry here. Every other error is printed as it reads.
+fn registry_unavailable_line(error: &anyhow::Error) -> String {
+    if error
+        .downcast_ref::<crate::plugin_registry::DefaultRegistryUnpopulated>()
+        .is_some()
+    {
+        qta("cli-quickstart-plugins-registry-unpopulated", &[])
+    } else {
+        qta(
+            "cli-quickstart-plugins-registry-unavailable",
+            &[("error", &terminal_safe_detail(&format!("{error:#}")))],
+        )
     }
 }
 
@@ -1032,7 +1049,8 @@ async fn install_one<P: QuickstartPrompter>(
     };
     // The load check `plugin install` gates on, run against the exact bytes
     // admission read. Its refusal is Quickstart's own: Quickstart has no
-    // `--no-verify`, so the text names the install command that has it.
+    // `--no-verify`, so the text names the install command that has it,
+    // addressed to this configuration like every command this step prints.
     let limits = zeroclaw_runtime::plugin_runtime::plugin_limits(config);
     if let Some(component) = admitted.component()
         && let Err(error) = zeroclaw::plugins::validate::verify_component_loads(
@@ -1042,11 +1060,18 @@ async fn install_one<P: QuickstartPrompter>(
         )
         .await
     {
+        // An admitted package name is lowercase letters, digits, `.`, `-`
+        // and `_`, which every supported shell passes as written.
+        let command = zeroclaw_command(
+            config,
+            &format!("plugin install {} --no-verify", admitted.manifest().name),
+        );
         prompter.say(&indented(&qta(
             "cli-quickstart-plugins-load-check-failed",
             &[
                 ("name", &display_name),
                 ("error", &terminal_safe_detail(&format!("{error:#}"))),
+                ("command", &command),
             ],
         )));
         return Ok(PackageOutcome::Failed {
@@ -1537,6 +1562,9 @@ async fn save_settings<P: QuickstartPrompter>(
                 &[("name", display_name), ("keys", &keys)],
             )));
         }
+        // Instance settings are secret: `config set` asks for each value with
+        // masked input, so the command carries no value to type into shell
+        // history, as in the status lines.
         Err(error) => prompter.say(&indented(&qta(
             "cli-quickstart-plugins-config-save-failed",
             &[
@@ -1545,7 +1573,10 @@ async fn save_settings<P: QuickstartPrompter>(
                 ("error", &terminal_safe_detail(&format!("{error:#}"))),
                 (
                     "command",
-                    &config_set_command(config, &setting_path(instance_key, "<key>"), "<value>"),
+                    &zeroclaw_command(
+                        config,
+                        &format!("config set {}", setting_path(instance_key, "<key>")),
+                    ),
                 ),
             ],
         ))),
@@ -2504,9 +2535,12 @@ hosts = ["api.example.com"]
             }]
         );
         let output = prompter.output();
+        let install_anyway =
+            zeroclaw_command(&workspace.config, "plugin install tool-fixture --no-verify");
         assert!(
-            output.contains("`zeroclaw plugin install tool-fixture --no-verify`"),
-            "the refusal names the install that accepts the package anyway: {output}"
+            install_anyway.contains("--config-dir") && output.contains(&install_anyway),
+            "the refusal names the install that accepts the package anyway, addressed to \
+             this configuration: {output}"
         );
         assert!(workspace.installed_packages().is_empty());
         assert!(workspace.config.plugins.entries.is_empty());
@@ -3146,6 +3180,16 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
             "the failed save is reported: {output}"
         );
         let key = fixture_instance_key();
+        // `config set` asks for a secret value with masked input, so the
+        // command carries none to type into shell history.
+        let set_later = zeroclaw_command(
+            &workspace.config,
+            &format!("config set plugins.entries.{key}.config.<key>"),
+        );
+        assert!(
+            output.contains(&set_later) && !output.contains("<value>"),
+            "the command that finishes the job carries no value: {output}"
+        );
         assert!(
             workspace
                 .row(&key)
@@ -3720,6 +3764,34 @@ type = "string"
         assert!(row.selected.is_empty());
         assert!(prompter.output().contains("HTTP 500"));
         server.verify().await;
+    }
+
+    #[test]
+    fn the_default_registrys_missing_index_names_the_environment_variable_not_a_flag() {
+        let unpopulated = anyhow::Error::from(crate::plugin_registry::DefaultRegistryUnpopulated);
+        // `plugin install` and `plugin search` keep their text, which names
+        // their flag.
+        assert!(format!("{unpopulated:#}").contains("--registry <url>"));
+
+        let line = registry_unavailable_line(&unpopulated);
+        assert_eq!(
+            line,
+            qta("cli-quickstart-plugins-registry-unpopulated", &[])
+        );
+        assert!(
+            line.contains("ZEROCLAW_PLUGIN_REGISTRY_URL") && !line.contains("--registry"),
+            "Quickstart has no --registry flag: {line}"
+        );
+
+        let other = anyhow::Error::msg("plugin registry returned HTTP 500");
+        assert_eq!(
+            registry_unavailable_line(&other),
+            qta(
+                "cli-quickstart-plugins-registry-unavailable",
+                &[("error", "plugin registry returned HTTP 500")]
+            ),
+            "every other failure is printed as it reads"
+        );
     }
 
     #[test]

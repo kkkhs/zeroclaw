@@ -105,6 +105,25 @@ pub(crate) async fn download_registry_entry(
         .await
 }
 
+/// The default registry answered 404: it serves no index yet.
+///
+/// Its text is what `plugin install` and `plugin search` print, and it names
+/// their `--registry` flag. A caller without that flag, such as Quickstart,
+/// recognizes this type in the error chain and says how it picks another
+/// registry instead.
+#[derive(Debug)]
+pub(crate) struct DefaultRegistryUnpopulated;
+
+impl std::fmt::Display for DefaultRegistryUnpopulated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the public plugin registry is not populated yet; use --registry <url> to point at a custom registry",
+        )
+    }
+}
+
+impl std::error::Error for DefaultRegistryUnpopulated {}
+
 /// Request bounds for registry traffic.
 ///
 /// `Default` is the production policy. Tests inject shorter bounds so a
@@ -157,9 +176,7 @@ impl RegistryClient {
         let status = response.status();
         if !status.is_success() {
             if status == reqwest::StatusCode::NOT_FOUND && registry_url == DEFAULT_REGISTRY_URL {
-                bail!(
-                    "the public plugin registry is not populated yet; use --registry <url> to point at a custom registry"
-                );
+                return Err(DefaultRegistryUnpopulated.into());
             }
             bail!("plugin registry returned HTTP {status} for {registry_url}");
         }

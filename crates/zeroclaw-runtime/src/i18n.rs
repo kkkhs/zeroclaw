@@ -1231,8 +1231,10 @@ mod tests {
             "zeroclaw --config-dir '/srv/zc' config set plugins.entries.{key}.egress_hosts '<host>'"
         );
         let set_later = format!(
-            "zeroclaw --config-dir '/srv/zc' config set plugins.entries.{key}.config.<key> <value>"
+            "zeroclaw --config-dir '/srv/zc' config set plugins.entries.{key}.config.<key>"
         );
+        let install_anyway =
+            "zeroclaw --config-dir '/srv/zc' plugin install weather-tool --no-verify";
         let create_later = format!(
             "printf '%s\\n' '[{{\"op\":\"add\",\"path\":\"/plugins/entries/{key}/egress_hosts\",\
              \"value\":[\"api.example.com\"]}}]' | zeroclaw --config-dir '/srv/zc' config patch -"
@@ -1242,7 +1244,7 @@ mod tests {
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 26] = [
+        let cases: [QuickstartPluginCase<'_>; 27] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1261,17 +1263,23 @@ mod tests {
                 &["weather-tool", "sha256"],
             ),
             // Quickstart has no `--no-verify`; a package that does not load
-            // names the install command that accepts it anyway.
+            // names the install command that accepts it anyway, addressed to
+            // the configuration Quickstart wrote.
             (
                 "cli-quickstart-plugins-load-check-failed",
                 &[
                     ("name", "weather-tool"),
                     ("error", "failed to load WASM component"),
+                    ("command", install_anyway),
                 ],
-                &[
-                    "failed to load WASM component",
-                    "`zeroclaw plugin install weather-tool --no-verify`",
-                ],
+                &["failed to load WASM component", install_anyway],
+            ),
+            // Quickstart has no `--registry` flag; the default registry's
+            // missing index names the environment variable that picks another.
+            (
+                "cli-quickstart-plugins-registry-unpopulated",
+                &[],
+                &["ZEROCLAW_PLUGIN_REGISTRY_URL"],
             ),
             // A withheld or missing grant hands back the exact command,
             // because the instance key it addresses is opaque.
