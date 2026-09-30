@@ -677,6 +677,10 @@ pub(crate) enum PackageOutcome {
     /// It was installed before this run and left as it was; `seeded_row` is
     /// whether this run created its missing config row.
     AlreadyInstalled { name: String, seeded_row: bool },
+    /// It was installed before this run without its config row, and the
+    /// operator skipped creating one. Nothing changed: it stays installed
+    /// without the row.
+    AlreadyInstalledSkipped { name: String },
     /// The operator chose not to install it. Nothing changed.
     Skipped { name: String },
     /// Quickstart would not install it. Nothing changed.
@@ -691,6 +695,7 @@ impl PackageOutcome {
         match self {
             Self::Installed { name }
             | Self::AlreadyInstalled { name, .. }
+            | Self::AlreadyInstalledSkipped { name }
             | Self::Skipped { name }
             | Self::Refused { name, .. }
             | Self::Failed { name, .. } => name,
@@ -700,6 +705,19 @@ impl PackageOutcome {
     /// Whether the package is installed after this run, whoever installed it.
     #[must_use]
     pub(crate) fn is_installed(&self) -> bool {
+        matches!(
+            self,
+            Self::Installed { .. }
+                | Self::AlreadyInstalled { .. }
+                | Self::AlreadyInstalledSkipped { .. }
+        )
+    }
+
+    /// Whether the operator went ahead with the package: this run installed
+    /// it, or kept it as installed before. Activating exactly these packages
+    /// is the expected next step; a skipped one is not among them.
+    #[must_use]
+    pub(crate) fn is_accepted(&self) -> bool {
         matches!(self, Self::Installed { .. } | Self::AlreadyInstalled { .. })
     }
 
@@ -722,6 +740,7 @@ impl PackageOutcome {
         match self {
             Self::Installed { .. } => "installed",
             Self::AlreadyInstalled { .. } => "already_installed",
+            Self::AlreadyInstalledSkipped { .. } => "already_installed_skipped",
             Self::Skipped { .. } => "skipped",
             Self::Refused { reason, .. } => reason.as_str(),
             Self::Failed { stage, .. } => stage.as_str(),
@@ -1161,12 +1180,26 @@ mod tests {
             name: "d".to_string(),
             stage: FailureStage::Download,
         };
+        let skipped_row = PackageOutcome::AlreadyInstalledSkipped {
+            name: "e".to_string(),
+        };
         assert!(installed.changed_state() && installed.is_installed());
         assert!(seeded.changed_state() && seeded.is_installed());
         assert!(!untouched.changed_state() && untouched.is_installed());
         assert!(!failed.changed_state() && !failed.is_installed());
         assert_eq!(failed.kind(), "download");
         assert_eq!(failed.name(), "d");
+
+        // A package kept by this run is one activation is expected to wake;
+        // one whose missing row the operator skipped is installed, but not
+        // accepted, and nothing about it changed.
+        for accepted in [&installed, &seeded, &untouched] {
+            assert!(accepted.is_accepted(), "{accepted:?}");
+        }
+        assert!(skipped_row.is_installed() && !skipped_row.is_accepted());
+        assert!(!skipped_row.changed_state());
+        assert!(!failed.is_accepted());
+        assert_eq!(skipped_row.kind(), "already_installed_skipped");
     }
 
     #[test]

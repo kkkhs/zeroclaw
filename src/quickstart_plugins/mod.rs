@@ -1130,7 +1130,8 @@ async fn install_one<P: QuickstartPrompter>(
 /// A row this run creates is a new grant. For a package that declares
 /// destinations it could reach, the operator gets the package summary and the
 /// same egress decision a fresh install gets, and a skip leaves the row
-/// absent. Nothing is asked when the row already exists.
+/// absent, recorded as its own outcome so the activation question does not
+/// count the package as picked. Nothing is asked when the row already exists.
 async fn keep_installed<P: QuickstartPrompter>(
     config: &mut Config,
     host: &PluginHost,
@@ -1187,7 +1188,9 @@ async fn keep_installed<P: QuickstartPrompter>(
                         "cli-quickstart-plugins-row-skipped",
                         &[("name", &display_name), ("command", &command)],
                     )));
-                    return Ok(kept(false));
+                    return Ok(PackageOutcome::AlreadyInstalledSkipped {
+                        name: name.to_string(),
+                    });
                 }
             }
         }
@@ -1617,9 +1620,12 @@ async fn activation_consent<P: QuickstartPrompter>(
     for instance in &preview.activated {
         prompter.say(&indented(&activated_line(instance)));
     }
+    // Only the packages the operator went ahead with count as this run's
+    // selection. One whose row they skipped is still installed, so the
+    // preview lists it, and waking it has to be opted into.
     let selected: BTreeSet<String> = outcomes
         .iter()
-        .filter(|outcome| outcome.is_installed())
+        .filter(|outcome| outcome.is_accepted())
         .map(|outcome| outcome.name().to_string())
         .collect();
     let only_selected = preview.activates_only(&selected);
@@ -2523,10 +2529,10 @@ hosts = ["api.example.com"]
 
     #[tokio::test]
     async fn an_installed_package_missing_its_row_gets_the_fresh_install_decision() {
-        for (decision, seeded_row, granted) in [
-            (GRANT, true, Some(vec![DECLARED_HOST.to_string()])),
-            (WITHHOLD, true, Some(Vec::new())),
-            (SKIP, false, None),
+        for (decision, skipped, granted) in [
+            (GRANT, false, Some(vec![DECLARED_HOST.to_string()])),
+            (WITHHOLD, false, Some(Vec::new())),
+            (SKIP, true, None),
         ] {
             let server = MockServer::start().await;
             serve_valid_archive(&server, 0).await;
@@ -2545,13 +2551,23 @@ hosts = ["api.example.com"]
                 .expect("the phase completes");
 
             prompter.assert_done();
-            assert_eq!(
-                phase.outcomes,
-                vec![PackageOutcome::AlreadyInstalled {
+            let expected = if skipped {
+                PackageOutcome::AlreadyInstalledSkipped {
                     name: FIXTURE_NAME.to_string(),
-                    seeded_row,
-                }],
-                "decision {decision}"
+                }
+            } else {
+                PackageOutcome::AlreadyInstalled {
+                    name: FIXTURE_NAME.to_string(),
+                    seeded_row: true,
+                }
+            };
+            assert_eq!(phase.outcomes, vec![expected], "decision {decision}");
+            // Activation still wakes the installed package. After a skip that
+            // is not what the operator went ahead with, so it is opted into.
+            assert_eq!(
+                prompter.confirm_defaults.last(),
+                Some(&!skipped),
+                "decision {decision}: the activation default"
             );
             assert_eq!(
                 prompter.choice_lists[0].len(),
@@ -2572,16 +2588,17 @@ hosts = ["api.example.com"]
                 granted,
                 "decision {decision}"
             );
-            if seeded_row {
-                assert!(
-                    row_on_disk(&workspace.config_on_disk(), &key).is_some(),
-                    "decision {decision}: the row is persisted"
-                );
-            } else {
+            if skipped {
                 assert_eq!(
                     workspace.config_bytes(),
                     before,
                     "a skip leaves the row absent"
+                );
+                assert_eq!(
+                    phase.apply_failed_headline(&workspace.config),
+                    None,
+                    "a skipped package is not reported as installed or configured \
+                     by this run"
                 );
                 assert!(
                     output.contains("config patch -"),
@@ -2606,6 +2623,11 @@ hosts = ["api.example.com"]
                 assert!(
                     !readiness.contains("config set plugins.entries"),
                     "no setting command for a row that does not exist: {readiness}"
+                );
+            } else {
+                assert!(
+                    row_on_disk(&workspace.config_on_disk(), &key).is_some(),
+                    "decision {decision}: the row is persisted"
                 );
             }
             server.verify().await;
@@ -3394,6 +3416,9 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
             phase(
                 vec![
                     kept(false),
+                    PackageOutcome::AlreadyInstalledSkipped {
+                        name: "rowless".to_string()
+                    },
                     PackageOutcome::Skipped {
                         name: "skipped".to_string()
                     },

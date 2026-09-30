@@ -157,10 +157,11 @@ whether to turn plugin activation on. First it lists which of those settings
 would change and everything that would become active as a result: every
 installed tool and skill plugin, including plugins installed before this run,
 and, when `plugins.enabled` is off, every enabled `[channels.plugin.<alias>]`
-channel. The answer defaults to yes when the list matches what you picked in
-this run, and to no when it would activate anything else. Declining leaves both
-settings unchanged and prints the `zeroclaw config set` commands that turn them
-on later. When both settings are already on, there is nothing to ask.
+channel. The answer defaults to yes when the list matches the plugins this run
+installed or kept, and to no when it would activate anything else, including an
+installed plugin whose missing config entry you chose to skip. Declining leaves
+both settings unchanged and prints the `zeroclaw config set` commands that turn
+them on later. When both settings are already on, there is nothing to ask.
 
 Once the agent is created, Quickstart prints the status of each picked plugin
 that is installed: active as a tool, with its config entry key, or the reason

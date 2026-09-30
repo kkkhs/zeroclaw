@@ -478,7 +478,8 @@ still apply:
   `plugins.enabled` or `plugins.auto_discover` without asking. Before it asks,
   it lists every tool, skill, and channel plugin those settings would
   activate, including plugins installed earlier, and the question defaults to
-  no when that list goes beyond the plugins you just picked.
+  no when that list goes beyond the plugins the run installed or kept. A
+  plugin whose missing row you skipped is not one of them.
 
 Quickstart is stricter than `plugin install` in one respect: it refuses a
 registry entry that carries no `sha256` digest for its archive instead of
