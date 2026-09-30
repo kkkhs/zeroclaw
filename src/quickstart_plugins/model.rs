@@ -1,17 +1,18 @@
 //! Pure half of the Quickstart plugin step.
 //!
 //! Everything here is a function of values the caller already holds: the
-//! package catalog, a manifest's `config_schema`, the activation flags and the
-//! installed package list. Nothing reads the terminal, the network, the plugins
-//! directory or the config file, so every rule is unit tested directly. The
-//! interactive half in the parent module owns each prompt and each write.
+//! package catalog, a manifest's `config_schema`, an instance's config row,
+//! the activation flags and the installed package list. Nothing reads the
+//! terminal, the network, the plugins directory or the config file, so every
+//! rule is unit tested directly. The interactive half in the parent module
+//! owns each prompt and each write.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::Value;
 use zeroclaw::plugins::catalog::PluginCatalogEntry;
 use zeroclaw::plugins::registry::PluginRegistryEntry;
-use zeroclaw::plugins::{PluginCapability, PluginInfo, PluginPermission};
+use zeroclaw::plugins::{PluginCapability, PluginInfo, PluginManifest, PluginPermission};
 use zeroclaw_config::traits::PropKind;
 use zeroclaw_runtime::quickstart::FieldDescriptor;
 
@@ -465,6 +466,40 @@ pub(crate) fn encode_value(field: &ConfigField, raw: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// The required settings an instance's config row leaves unset.
+///
+/// A required setting is a name in the schema's root `required` list that the
+/// root `properties` map declares and that is a portable plugin key: one that
+/// `config set plugins.entries.<key>.config.<name>` can write. It counts as
+/// set when the row holds its key, whatever the value, because `required`
+/// asks only for presence; values are never read here. With no row, every
+/// required setting is unset. Sorted, without duplicates.
+#[must_use]
+pub(crate) fn missing_required_settings(
+    manifest: &PluginManifest,
+    configured: Option<&HashMap<String, String>>,
+) -> Vec<String> {
+    let Some(schema) = manifest.config_schema.as_ref() else {
+        return Vec::new();
+    };
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let missing: BTreeSet<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|name| {
+            properties.contains_key(*name)
+                && zeroclaw_api::plugin_key::is_valid_portable_plugin_key(name)
+                && configured.is_none_or(|row| !row.contains_key(*name))
+        })
+        .collect();
+    missing.into_iter().map(str::to_string).collect()
+}
+
 /// Snake-case names of a manifest's capabilities, as manifests spell them.
 #[must_use]
 pub(crate) fn capability_names(capabilities: &[PluginCapability]) -> Vec<String> {
@@ -633,26 +668,12 @@ impl FailureStage {
     }
 }
 
-/// Required settings of an installed instance that were left unset.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct UnsetSettings {
-    /// The `[[plugins.entries]]` row the settings belong to.
-    pub(crate) instance_key: String,
-    /// The property names, never their values.
-    pub(crate) keys: Vec<String>,
-}
-
 /// What the Create-time plugin phase did with one selected package.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PackageOutcome {
     /// This run published it through the canonical publish-and-seed
-    /// transaction. `unset_required` holds the required settings the operator
-    /// chose to install it without: the runtime resolver rejects every call
-    /// to the instance until each one is set.
-    Installed {
-        name: String,
-        unset_required: Option<UnsetSettings>,
-    },
+    /// transaction.
+    Installed { name: String },
     /// It was installed before this run and left as it was; `seeded_row` is
     /// whether this run created its missing config row.
     AlreadyInstalled { name: String, seeded_row: bool },
@@ -668,23 +689,11 @@ impl PackageOutcome {
     #[must_use]
     pub(crate) fn name(&self) -> &str {
         match self {
-            Self::Installed { name, .. }
+            Self::Installed { name }
             | Self::AlreadyInstalled { name, .. }
             | Self::Skipped { name }
             | Self::Refused { name, .. }
             | Self::Failed { name, .. } => name,
-        }
-    }
-
-    /// The required settings this run installed the package without.
-    #[must_use]
-    pub(crate) fn unset_required(&self) -> Option<&UnsetSettings> {
-        match self {
-            Self::Installed { unset_required, .. } => unset_required.as_ref(),
-            Self::AlreadyInstalled { .. }
-            | Self::Skipped { .. }
-            | Self::Refused { .. }
-            | Self::Failed { .. } => None,
         }
     }
 
@@ -1054,11 +1063,91 @@ mod tests {
         assert!(preview.activates_only(&selected));
     }
 
+    /// A tool manifest around `config_schema`, parsed as a manifest file is.
+    fn manifest_with(config_schema: Option<Value>) -> PluginManifest {
+        serde_json::from_value(json!({
+            "name": "tool",
+            "version": "1.0.0",
+            "capabilities": ["tool"],
+            "permissions": ["config_read"],
+            "config_schema": config_schema,
+        }))
+        .expect("the manifest parses")
+    }
+
+    /// A config row holding `keys`, each set to `value`.
+    fn row(keys: &[&str], value: &str) -> HashMap<String, String> {
+        keys.iter()
+            .map(|key| ((*key).to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn missing_required_settings_are_none_without_a_schema_or_a_required_list() {
+        let no_schema = manifest_with(None);
+        assert!(missing_required_settings(&no_schema, None).is_empty());
+        assert!(missing_required_settings(&no_schema, Some(&row(&["zone"], "eu"))).is_empty());
+
+        let nothing_required = manifest_with(Some(json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": { "zone": { "type": "string" } }
+        })));
+        assert!(missing_required_settings(&nothing_required, None).is_empty());
+        assert!(missing_required_settings(&nothing_required, Some(&HashMap::new())).is_empty());
+    }
+
+    #[test]
+    fn missing_required_settings_subtract_the_keys_the_row_holds() {
+        let manifest = manifest_with(Some(schema()));
+        assert_eq!(
+            missing_required_settings(&manifest, None),
+            vec!["api_token", "zone"],
+            "with no row at all, every required setting is unset"
+        );
+        assert_eq!(
+            missing_required_settings(&manifest, Some(&HashMap::new())),
+            vec!["api_token", "zone"]
+        );
+        assert_eq!(
+            missing_required_settings(&manifest, Some(&row(&["retries", "zone"], "7"))),
+            vec!["api_token"],
+            "an optional setting does not stand in for a required one"
+        );
+        assert!(
+            missing_required_settings(&manifest, Some(&row(&["api_token", "zone"], "x")))
+                .is_empty()
+        );
+        assert!(
+            missing_required_settings(&manifest, Some(&row(&["api_token", "zone"], ""))).is_empty(),
+            "a key present with an empty value counts as set: only presence is read"
+        );
+    }
+
+    #[test]
+    fn missing_required_settings_name_only_settings_config_set_can_write() {
+        let manifest = manifest_with(Some(json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["zone", "bad key", "undeclared", "zone", "api_token"],
+            "properties": {
+                "api_token": { "type": "string", "x-secret": true },
+                "bad key": { "type": "string" },
+                "zone": { "type": "string" }
+            }
+        })));
+        assert_eq!(
+            missing_required_settings(&manifest, None),
+            vec!["api_token", "zone"],
+            "a non-portable name and a name `properties` does not declare are left out, \
+             and the rest are sorted once each"
+        );
+    }
+
     #[test]
     fn outcomes_report_what_changed() {
         let installed = PackageOutcome::Installed {
             name: "a".to_string(),
-            unset_required: None,
         };
         let seeded = PackageOutcome::AlreadyInstalled {
             name: "b".to_string(),
@@ -1073,21 +1162,6 @@ mod tests {
             stage: FailureStage::Download,
         };
         assert!(installed.changed_state() && installed.is_installed());
-        assert_eq!(installed.unset_required(), None);
-        let unconfigured = PackageOutcome::Installed {
-            name: "e".to_string(),
-            unset_required: Some(UnsetSettings {
-                instance_key: "zpi1_e".to_string(),
-                keys: vec!["api_token".to_string()],
-            }),
-        };
-        assert!(unconfigured.changed_state() && unconfigured.is_installed());
-        assert_eq!(
-            unconfigured
-                .unset_required()
-                .map(|unset| unset.keys.as_slice()),
-            Some(&["api_token".to_string()][..])
-        );
         assert!(seeded.changed_state() && seeded.is_installed());
         assert!(!untouched.changed_state() && untouched.is_installed());
         assert!(!failed.changed_state() && !failed.is_installed());

@@ -36,9 +36,10 @@ use crate::plugins::egress_ceremony::{
 use crate::qta;
 use model::{
     ActivatedInstance, ActivationInputs, ActivationPreview, ChannelBinding, ChoiceState,
-    ConfigField, FailureStage, PackageOutcome, PluginChoice, Refusal, UnsetSettings, ValueKind,
+    ConfigField, FailureStage, PackageOutcome, PluginChoice, Refusal, ValueKind,
     activation_preview, capability_names, config_fields, encode_value, field_descriptor,
-    permission_names, plugin_choices, terminal_safe, terminal_safe_detail,
+    missing_required_settings, permission_names, plugin_choices, terminal_safe,
+    terminal_safe_detail,
 };
 
 /// Why a prompt produced no answer.
@@ -439,9 +440,9 @@ fn changed_names(outcomes: &[PackageOutcome]) -> String {
 }
 
 impl CreatePhase {
-    /// After the agent step succeeded: one activation verdict per installed
-    /// package, from the same activation plan every registry build derives,
-    /// then the restart note.
+    /// After the agent step succeeded: the status of each installed package,
+    /// from the same activation plan every registry build derives and the
+    /// config row its instance reads its settings from, then the restart note.
     pub(crate) fn print_readiness(&self, config: &Config) {
         for line in self.readiness_lines(config) {
             println!("{line}");
@@ -449,23 +450,25 @@ impl CreatePhase {
     }
 
     fn readiness_lines(&self, config: &Config) -> Vec<String> {
-        let installed: Vec<&PackageOutcome> = self
+        let installed: Vec<&str> = self
             .outcomes
             .iter()
             .filter(|outcome| outcome.is_installed())
+            .map(PackageOutcome::name)
             .collect();
         if installed.is_empty() {
             return Vec::new();
         }
-        let names: Vec<&str> = installed.iter().map(|outcome| outcome.name()).collect();
         let mut lines = vec![
             String::new(),
             qta("cli-quickstart-plugins-readiness-heading", &[]),
         ];
-        match admission_verdicts(config, &names) {
-            Ok(verdicts) => {
-                for (outcome, (_, verdict)) in installed.iter().zip(&verdicts) {
-                    lines.extend(package_readiness(config, outcome, verdict));
+        // A fresh host, so every status describes the plugins directory and
+        // the config as they now are.
+        match crate::plugin_host_with_configured_security(config) {
+            Ok(host) => {
+                for name in installed {
+                    lines.extend(package_readiness(config, &host, name));
                 }
             }
             Err(error) => lines.push(indented(&qta(
@@ -521,58 +524,85 @@ impl CreatePhase {
     }
 }
 
-/// Each package's activation verdict against a fresh host, so the answer
-/// describes the plugins directory and config as they now are.
-fn admission_verdicts(
-    config: &Config,
-    names: &[&str],
-) -> anyhow::Result<Vec<(String, anyhow::Result<ToolInstanceAdmission>)>> {
-    let host = crate::plugin_host_with_configured_security(config)?;
-    Ok(names
-        .iter()
-        .map(|name| {
-            let verdict =
-                zeroclaw_runtime::plugin_runtime::tool_instance_admission(config, &host, name)
-                    .map_err(anyhow::Error::from);
-            ((*name).to_string(), verdict)
-        })
-        .collect())
+/// One installed package's readiness lines, read from `host` and `config`.
+///
+/// A verdict that holds the instance back is reported first. Whatever the
+/// verdict, an instance whose config row lacks a required setting is rejected
+/// on every call, so it is never reported as active: its line names the
+/// missing settings and gives the command that sets each one. When the row
+/// cannot be read, the status is reported unavailable rather than active.
+fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<String> {
+    let verdict = zeroclaw_runtime::plugin_runtime::tool_instance_admission(config, host, name)
+        .map_err(anyhow::Error::from);
+    let admitted = matches!(verdict, Ok(ToolInstanceAdmission::Admitted { .. }));
+    let mut lines = Vec::new();
+    if !admitted {
+        lines.push(indented(&readiness_line(name, &verdict)));
+    }
+    match missing_settings(config, host, name, &verdict) {
+        Ok(Some((instance_key, missing))) if !missing.is_empty() => {
+            lines.push(indented(&qta(
+                "cli-quickstart-plugins-ready-missing-settings",
+                &[
+                    ("name", &terminal_safe(name)),
+                    ("keys", &missing.join(", ")),
+                ],
+            )));
+            // Instance settings are secret, so `config set` asks for each
+            // value with masked input and the command carries none.
+            lines.extend(missing.iter().map(|key| {
+                indented(&indented(&zeroclaw_command(
+                    config,
+                    &format!("config set {}", setting_path(&instance_key, key)),
+                )))
+            }));
+        }
+        Ok(_) if admitted => lines.push(indented(&readiness_line(name, &verdict))),
+        Ok(_) => {}
+        Err(error) => lines.push(indented(&readiness_line(name, &Err(error)))),
+    }
+    lines
 }
 
-/// One installed package's readiness lines.
+/// The config row `name`'s tool instance reads its settings from, and the
+/// required settings that row leaves unset, from the manifest `host` admitted
+/// and the row as `config` holds it now. `None` when the package holds no tool
+/// instance with a row.
 ///
-/// An instance installed without its required settings is rejected on every
-/// call, so it is never reported as active: its line names the missing
-/// settings and gives the command that sets each one. A verdict that holds the
-/// instance back for another reason is still reported first.
-fn package_readiness(
+/// An admitted instance's row is the one its verdict names. For any other
+/// verdict the row is derived from the manifest as install seeds it, so an
+/// instance held back today still reports what it lacks.
+///
+/// # Errors
+///
+/// When more than one row holds the instance key, or the key cannot be
+/// derived from the manifest.
+fn missing_settings(
     config: &Config,
-    outcome: &PackageOutcome,
+    host: &PluginHost,
+    name: &str,
     verdict: &anyhow::Result<ToolInstanceAdmission>,
-) -> Vec<String> {
-    let Some(unset) = outcome.unset_required() else {
-        return vec![indented(&readiness_line(outcome.name(), verdict))];
+) -> anyhow::Result<Option<(String, Vec<String>)>> {
+    let Some(manifest) = host.manifest(name) else {
+        return Ok(None);
     };
-    let mut lines = Vec::new();
-    if !matches!(verdict, Ok(ToolInstanceAdmission::Admitted { .. })) {
-        lines.push(indented(&readiness_line(outcome.name(), verdict)));
-    }
-    lines.push(indented(&qta(
-        "cli-quickstart-plugins-ready-missing-settings",
-        &[
-            ("name", &terminal_safe(outcome.name())),
-            ("keys", &unset.keys.join(", ")),
-        ],
-    )));
-    // Instance settings are secret, so `config set` asks for each value with
-    // masked input and the command carries none.
-    lines.extend(unset.keys.iter().map(|key| {
-        indented(&indented(&zeroclaw_command(
-            config,
-            &format!("config set {}", setting_path(&unset.instance_key, key)),
-        )))
-    }));
-    lines
+    let instance_key = match verdict {
+        Ok(ToolInstanceAdmission::Admitted { instance_key }) => instance_key.clone(),
+        _ => {
+            let tool_row = crate::manifest_config_entries(manifest)?
+                .into_iter()
+                .find_map(|(capability, key)| {
+                    (capability == PluginCapability::Tool).then_some(key)
+                });
+            let Some(instance_key) = tool_row else {
+                return Ok(None);
+            };
+            instance_key
+        }
+    };
+    let row = config.plugins.entry_config(&instance_key)?;
+    let missing = missing_required_settings(manifest, row);
+    Ok(Some((instance_key, missing)))
 }
 
 fn readiness_line(name: &str, verdict: &anyhow::Result<ToolInstanceAdmission>) -> String {
@@ -1047,16 +1077,7 @@ async fn install_one<P: QuickstartPrompter>(
             )));
         }
     }
-    let unset_required = instance_key
-        .filter(|_| !settings.unset_required.is_empty())
-        .map(|instance_key| UnsetSettings {
-            instance_key,
-            keys: settings.unset_required,
-        });
-    Ok(PackageOutcome::Installed {
-        name,
-        unset_required,
-    })
+    Ok(PackageOutcome::Installed { name })
 }
 
 /// A package that was installed before this run: no download, no publish, no
@@ -1304,8 +1325,6 @@ fn ask_field<P: QuickstartPrompter>(
 struct CollectedSettings {
     /// Validated values, written once the package is published.
     values: BTreeMap<String, String>,
-    /// Required properties the operator chose to install the package without.
-    unset_required: Vec<String>,
 }
 
 /// Prompt for the instance's settings and validate them against the
@@ -1372,12 +1391,7 @@ fn collect_settings<P: QuickstartPrompter>(
             }
         }
         match validate_settings(manifest, &values) {
-            Ok(()) => {
-                return Ok(Some(CollectedSettings {
-                    values,
-                    unset_required: Vec::new(),
-                }));
-            }
+            Ok(()) => return Ok(Some(CollectedSettings { values })),
             Err(error) => prompter.say(&indented(&qta(
                 "cli-quickstart-plugins-config-invalid",
                 &[("name", &name), ("error", &terminal_safe_detail(&error))],
@@ -1392,11 +1406,9 @@ fn collect_settings<P: QuickstartPrompter>(
         false,
     )?;
     // Nothing is written, and the resolver fills in no defaults: every
-    // required property stays unset until the operator sets it.
-    Ok((proceed == Some(true)).then(|| CollectedSettings {
-        values: BTreeMap::new(),
-        unset_required: required.iter().map(|field| field.key.clone()).collect(),
-    }))
+    // required property stays unset until the operator sets it, and the
+    // status printed after Create reads that from the row.
+    Ok((proceed == Some(true)).then(CollectedSettings::default))
 }
 
 /// Validate a whole settings map as the runtime resolves it. The resolver's
@@ -2015,10 +2027,39 @@ hosts = ["api.example.com"]
     }
 
     fn verdict(config: &Config) -> ToolInstanceAdmission {
-        let mut verdicts = admission_verdicts(config, &[FIXTURE_NAME]).expect("host builds");
-        let (name, verdict) = verdicts.pop().expect("one verdict");
-        assert_eq!(name, FIXTURE_NAME);
-        verdict.expect("the activation plan builds")
+        let host = crate::plugin_host_with_configured_security(config).expect("host builds");
+        zeroclaw_runtime::plugin_runtime::tool_instance_admission(config, &host, FIXTURE_NAME)
+            .expect("the activation plan builds")
+    }
+
+    /// The fixture's status after Create when its row lacks both required
+    /// settings: never active, the two settings named, and one command per
+    /// setting that carries no value.
+    fn assert_reported_missing(readiness: &[String], key: &str) {
+        let text = readiness.join("\n");
+        assert!(
+            !text.contains(&qta(
+                "cli-quickstart-plugins-ready",
+                &[("name", FIXTURE_NAME), ("key", key)]
+            )),
+            "an instance the resolver rejects is not reported active: {text}"
+        );
+        assert!(
+            text.contains(&qta(
+                "cli-quickstart-plugins-ready-missing-settings",
+                &[("name", FIXTURE_NAME), ("keys", "api_token, label")]
+            )),
+            "{text}"
+        );
+        for setting in ["api_token", "label"] {
+            let path = format!("config set plugins.entries.{key}.config.{setting}");
+            assert!(
+                readiness
+                    .iter()
+                    .any(|line| line.contains("--config-dir") && line.ends_with(&path)),
+                "one command per setting, with no value on it: {text}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2040,7 +2081,6 @@ hosts = ["api.example.com"]
             phase.outcomes,
             vec![PackageOutcome::Installed {
                 name: FIXTURE_NAME.to_string(),
-                unset_required: None,
             }]
         );
         assert!(phase.activation_changed);
@@ -2149,7 +2189,6 @@ hosts = ["api.example.com"]
             phase.outcomes,
             vec![PackageOutcome::Installed {
                 name: FIXTURE_NAME.to_string(),
-                unset_required: None,
             }]
         );
         assert!(!phase.activation_changed);
@@ -2542,7 +2581,6 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
             phase.outcomes,
             vec![PackageOutcome::Installed {
                 name: FIXTURE_NAME.to_string(),
-                unset_required: None,
             }]
         );
         assert!(workspace.package_dir().is_dir(), "the package is installed");
@@ -2569,6 +2607,16 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
                     .collect::<Vec<_>>()),
             Some(vec![unrelated_host])
         );
+        // The existing row holds both required settings, so the instance is
+        // active; the status reads their presence, never their values.
+        let readiness = phase.readiness_lines(&workspace.config).join("\n");
+        assert!(
+            readiness.contains(&qta(
+                "cli-quickstart-plugins-ready",
+                &[("name", FIXTURE_NAME), ("key", &key)]
+            )),
+            "{readiness}"
+        );
         server.verify().await;
     }
 
@@ -2583,7 +2631,6 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
         for outcome in [
             PackageOutcome::Installed {
                 name: FIXTURE_NAME.to_string(),
-                unset_required: None,
             },
             PackageOutcome::Failed {
                 name: FIXTURE_NAME.to_string(),
@@ -2642,7 +2689,6 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
             phase.outcomes,
             vec![PackageOutcome::Installed {
                 name: FIXTURE_NAME.to_string(),
-                unset_required: None,
             }]
         );
         let row = workspace
@@ -2693,10 +2739,6 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
             phase.outcomes,
             vec![PackageOutcome::Installed {
                 name: FIXTURE_NAME.to_string(),
-                unset_required: Some(UnsetSettings {
-                    instance_key: key.clone(),
-                    keys: vec!["api_token".to_string(), "label".to_string()],
-                }),
             }]
         );
         assert!(
@@ -2716,35 +2758,226 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
         );
 
         let readiness = phase.readiness_lines(&workspace.config);
+        assert_reported_missing(&readiness, &key);
         let text = readiness.join("\n");
+        let output = prompter.output();
+        for printed in [&text, &output] {
+            assert!(
+                !printed.contains(SECRET) && !printed.contains(bad_value),
+                "{printed}"
+            );
+        }
+
+        // Held back by a flag, the verdict comes first and the missing
+        // settings still follow it.
+        workspace.config.plugins.enabled = false;
+        let held_back = phase.readiness_lines(&workspace.config);
+        assert_eq!(
+            held_back.get(2),
+            Some(&indented(&qta(
+                "cli-quickstart-plugins-ready-plugins-disabled",
+                &[("name", FIXTURE_NAME)]
+            ))),
+            "{held_back:?}"
+        );
+        assert_reported_missing(&held_back, &key);
+        workspace.config.plugins.enabled = true;
+
+        // The status reads the row, not a record of this run: once both
+        // settings are present, the same phase reports the instance active.
+        let row = workspace
+            .config
+            .plugins
+            .entries
+            .iter_mut()
+            .find(|entry| entry.name == key)
+            .expect("the row is seeded");
+        row.config
+            .insert("api_token".to_string(), "set-later".to_string());
+        row.config.insert("label".to_string(), "demo".to_string());
+        let readiness = phase.readiness_lines(&workspace.config).join("\n");
         assert!(
-            !text.contains(&qta(
+            readiness.contains(&qta(
                 "cli-quickstart-plugins-ready",
                 &[("name", FIXTURE_NAME), ("key", &key)]
             )),
-            "an instance the resolver rejects is not reported active: {text}"
-        );
-        assert!(
-            text.contains(&qta(
-                "cli-quickstart-plugins-ready-missing-settings",
-                &[("name", FIXTURE_NAME), ("keys", "api_token, label")]
-            )),
-            "{text}"
-        );
-        for setting in ["api_token", "label"] {
-            let path = format!("config set plugins.entries.{key}.config.{setting}");
-            assert!(
-                readiness
-                    .iter()
-                    .any(|line| line.contains("--config-dir") && line.ends_with(&path)),
-                "one command per setting, with no value on it: {text}"
-            );
-        }
-        assert!(
-            !text.contains(SECRET) && !text.contains(bad_value),
-            "{text}"
+            "{readiness}"
         );
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn settings_that_fail_to_save_are_reported_missing_rather_than_active() {
+        let server = MockServer::start().await;
+        serve_valid_archive(&server, 1).await;
+        let mut workspace = Workspace::new();
+        // A key file of the wrong length. The seeded row holds no secret, so
+        // the publish saves; the first save that must encrypt a setting fails.
+        std::fs::write(workspace.dir.path().join(".secret_key"), "00")
+            .expect("write a broken key file");
+        let selection = selection(fixture_entry(&server, Some(archive_digest())));
+        let mut answers = install_answers(GRANT);
+        answers.push(Answer::Confirm(Some(true)));
+        let mut prompter = ScriptedPrompter::new(answers);
+
+        let phase = run(&mut workspace, &selection, &mut prompter)
+            .await
+            .expect("the phase completes");
+
+        prompter.assert_done();
+        assert_eq!(
+            phase.outcomes,
+            vec![PackageOutcome::Installed {
+                name: FIXTURE_NAME.to_string(),
+            }]
+        );
+        let output = prompter.output();
+        let failed = qta(
+            "cli-quickstart-plugins-config-save-failed",
+            &[
+                ("name", FIXTURE_NAME),
+                ("keys", "api_token, label"),
+                ("error", "<error>"),
+                ("command", "<command>"),
+            ],
+        );
+        let (failed_prefix, _) = failed
+            .split_once("<error>")
+            .expect("the message carries the error");
+        assert!(
+            output.contains(failed_prefix),
+            "the failed save is reported: {output}"
+        );
+        let key = fixture_instance_key();
+        assert!(
+            workspace
+                .row(&key)
+                .expect("the row is seeded")
+                .config
+                .is_empty(),
+            "the row holds no setting"
+        );
+        let on_disk = row_on_disk(&workspace.config_on_disk(), &key).expect("the row is on disk");
+        assert!(
+            on_disk
+                .get("config")
+                .and_then(toml::Value::as_table)
+                .is_none_or(toml::Table::is_empty),
+            "no setting reached disk: {on_disk:?}"
+        );
+        assert!(workspace.config.plugins.enabled && workspace.config.plugins.auto_discover);
+        assert_eq!(
+            verdict(&workspace.config),
+            ToolInstanceAdmission::Admitted {
+                instance_key: key.clone()
+            }
+        );
+
+        let readiness = phase.readiness_lines(&workspace.config);
+        assert_reported_missing(&readiness, &key);
+        let text = readiness.join("\n");
+        for printed in [&text, &output] {
+            assert!(!printed.contains(SECRET), "{printed}");
+        }
+        assert!(
+            !String::from_utf8_lossy(&workspace.config_bytes()).contains(SECRET),
+            "the typed secret never reaches disk"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn an_installed_package_whose_new_row_lacks_required_settings_is_not_reported_active() {
+        let server = MockServer::start().await;
+        serve_valid_archive(&server, 0).await;
+        let mut workspace = Workspace::new();
+        install_without_a_row(&workspace);
+        let selection = selection(fixture_entry(&server, Some(archive_digest())));
+        // Grant the declared destination, then turn activation on. A package
+        // installed before this run is never asked for its settings.
+        let mut prompter =
+            ScriptedPrompter::new([Answer::Select(Some(GRANT)), Answer::Confirm(Some(true))]);
+
+        let phase = run(&mut workspace, &selection, &mut prompter)
+            .await
+            .expect("the phase completes");
+
+        prompter.assert_done();
+        assert_eq!(
+            phase.outcomes,
+            vec![PackageOutcome::AlreadyInstalled {
+                name: FIXTURE_NAME.to_string(),
+                seeded_row: true,
+            }]
+        );
+        assert!(prompter.fields.is_empty(), "no setting was asked for");
+        let key = fixture_instance_key();
+        assert!(
+            workspace
+                .row(&key)
+                .expect("the row is seeded")
+                .config
+                .is_empty()
+        );
+        assert_eq!(
+            verdict(&workspace.config),
+            ToolInstanceAdmission::Admitted {
+                instance_key: key.clone()
+            }
+        );
+        assert_reported_missing(&phase.readiness_lines(&workspace.config), &key);
+        server.verify().await;
+    }
+
+    #[test]
+    fn a_duplicated_row_is_reported_unavailable_rather_than_active() {
+        let mut workspace = Workspace::new();
+        install_without_a_row(&workspace);
+        workspace.config.plugins.enabled = true;
+        workspace.config.plugins.auto_discover = true;
+        let key = fixture_instance_key();
+        // Config validation refuses this at load; the status must not
+        // panic on it or call the instance active.
+        let row = crate::config::schema::PluginEntryConfig {
+            name: key.clone(),
+            config: HashMap::from([
+                ("api_token".to_string(), "x".to_string()),
+                ("label".to_string(), "demo".to_string()),
+            ]),
+            ..Default::default()
+        };
+        workspace.config.plugins.entries = vec![row.clone(), row];
+        let phase = CreatePhase {
+            outcomes: vec![PackageOutcome::AlreadyInstalled {
+                name: FIXTURE_NAME.to_string(),
+                seeded_row: false,
+            }],
+            activation_changed: false,
+        };
+
+        let readiness = phase.readiness_lines(&workspace.config);
+
+        assert_eq!(
+            readiness.get(2),
+            Some(&indented(&qta(
+                "cli-quickstart-plugins-ready-unknown",
+                &[
+                    ("name", FIXTURE_NAME),
+                    (
+                        "error",
+                        &zeroclaw_config::schema::DuplicatePluginConfigEntry.to_string()
+                    ),
+                ]
+            ))),
+            "{readiness:?}"
+        );
+        assert!(
+            !readiness.join("\n").contains(&qta(
+                "cli-quickstart-plugins-ready",
+                &[("name", FIXTURE_NAME), ("key", &key)]
+            )),
+            "{readiness:?}"
+        );
     }
 
     #[tokio::test]
@@ -2809,7 +3042,6 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
             outcomes,
             &vec![PackageOutcome::Installed {
                 name: FIXTURE_NAME.to_string(),
-                unset_required: None,
             }]
         );
         assert!(workspace.package_dir().join("manifest.toml").is_file());
