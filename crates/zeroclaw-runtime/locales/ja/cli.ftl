@@ -689,6 +689,7 @@ cli-quickstart-plugins-not-available = {$name} はもうインストールされ
 cli-quickstart-plugins-no-integrity-hash = {$name} を拒否しました: レジストリエントリに sha256 ダイジェストがないため、ダウンロードを検証できません。何もインストールしていません。
 cli-quickstart-plugins-not-a-tool = {$name} をスキップしました: マニフェストがツールを提供しておらず、クイックスタートはツールプラグインのみをインストールします。何もインストールしていません。
 cli-quickstart-plugins-failed = {$name} はインストールされませんでした: {$error}
+cli-quickstart-plugins-load-check-failed = {$name} はインストールされませんでした: このホストで読み込めません: {$error}。起動時にスキップされるプラグインでも構わない場合は、`zeroclaw plugin install {$name} --no-verify` で強制的にインストールできます。
 cli-quickstart-plugins-about-name = プラグイン {$name} {$version}
 cli-quickstart-plugins-about-author = 作成者: {$author}
 cli-quickstart-plugins-about-description = 説明: {$description}

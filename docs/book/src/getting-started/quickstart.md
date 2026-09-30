@@ -101,7 +101,10 @@ uses:
 2. It downloads and verifies the archive, confirms that the manifest provides a
    tool, admits the package, and runs the install-time load check. When any of
    these steps fails, Quickstart reports it, writes nothing for that plugin,
-   and moves on to the next one.
+   and moves on to the next one. Quickstart has no `--no-verify`: for a plugin
+   that fails the load check it prints the
+   `zeroclaw plugin install <name> --no-verify` command, which installs a
+   plugin that the daemon then skips at startup.
 3. It prints what the plugin is and what it asks for: name, version, author,
    description, capabilities, permissions, and the network destinations its
    manifest declares. Publisher text is stripped of terminal control sequences

@@ -1241,7 +1241,7 @@ mod tests {
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 20] = [
+        let cases: [QuickstartPluginCase<'_>; 21] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1258,6 +1258,19 @@ mod tests {
                 "cli-quickstart-plugins-no-integrity-hash",
                 &[("name", "weather-tool")],
                 &["weather-tool", "sha256"],
+            ),
+            // Quickstart has no `--no-verify`; a package that does not load
+            // names the install command that accepts it anyway.
+            (
+                "cli-quickstart-plugins-load-check-failed",
+                &[
+                    ("name", "weather-tool"),
+                    ("error", "failed to load WASM component"),
+                ],
+                &[
+                    "failed to load WASM component",
+                    "`zeroclaw plugin install weather-tool --no-verify`",
+                ],
             ),
             // A withheld or missing grant hands back the exact command,
             // because the instance key it addresses is opaque.

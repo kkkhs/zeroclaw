@@ -880,14 +880,29 @@ async fn install_one<P: QuickstartPrompter>(
             ));
         }
     };
+    // The load check `plugin install` gates on, run against the exact bytes
+    // admission read. Its refusal is Quickstart's own: Quickstart has no
+    // `--no-verify`, so the text names the install command that has it.
     let limits = zeroclaw_runtime::plugin_runtime::plugin_limits(config);
-    if let Err(error) = crate::verify_plugin_loads_or_bail(&admitted, limits, false).await {
-        return Ok(failure(
-            prompter,
-            &name,
-            FailureStage::LoadCheck,
-            &format!("{error:#}"),
-        ));
+    if let Some(component) = admitted.component()
+        && let Err(error) = zeroclaw::plugins::validate::verify_component_loads(
+            component,
+            admitted.manifest(),
+            limits,
+        )
+        .await
+    {
+        prompter.say(&indented(&qta(
+            "cli-quickstart-plugins-load-check-failed",
+            &[
+                ("name", &display_name),
+                ("error", &terminal_safe_detail(&format!("{error:#}"))),
+            ],
+        )));
+        return Ok(PackageOutcome::Failed {
+            name,
+            stage: FailureStage::LoadCheck,
+        });
     }
 
     let manifest = admitted.manifest().clone();
@@ -2265,6 +2280,40 @@ hosts = ["api.example.com"]
             assert_eq!(workspace.config_bytes(), before, "{case}");
             server.verify().await;
         }
+    }
+
+    #[tokio::test]
+    async fn a_package_that_does_not_load_names_the_install_that_accepts_it() {
+        let server = MockServer::start().await;
+        serve_valid_archive(&server, 1).await;
+        let mut workspace = Workspace::new();
+        // Fewer instances than the component needs, so the load check that
+        // `plugin install` runs refuses it.
+        workspace.config.plugins.limits.max_instances = 1;
+        let before = workspace.config_bytes();
+        let selection = selection(fixture_entry(&server, Some(archive_digest())));
+        let mut prompter = ScriptedPrompter::new([]);
+
+        let phase = run(&mut workspace, &selection, &mut prompter)
+            .await
+            .expect("the phase completes");
+
+        assert_eq!(
+            phase.outcomes,
+            vec![PackageOutcome::Failed {
+                name: FIXTURE_NAME.to_string(),
+                stage: FailureStage::LoadCheck,
+            }]
+        );
+        let output = prompter.output();
+        assert!(
+            output.contains("`zeroclaw plugin install tool-fixture --no-verify`"),
+            "the refusal names the install that accepts the package anyway: {output}"
+        );
+        assert!(workspace.installed_packages().is_empty());
+        assert!(workspace.config.plugins.entries.is_empty());
+        assert_eq!(workspace.config_bytes(), before);
+        server.verify().await;
     }
 
     #[tokio::test]

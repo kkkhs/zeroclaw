@@ -690,6 +690,7 @@ cli-quickstart-plugins-not-available = {$name} 已不再安装，也不在注册
 cli-quickstart-plugins-no-integrity-hash = 已拒绝 {$name}：其注册表条目没有 sha256 摘要，因此无法验证下载内容。未安装任何内容。
 cli-quickstart-plugins-not-a-tool = 已跳过 {$name}：其清单不提供任何工具，而 Quickstart 只安装工具插件。未安装任何内容。
 cli-quickstart-plugins-failed = 未安装 {$name}：{$error}
+cli-quickstart-plugins-load-check-failed = 未安装 {$name}：它无法在此主机上加载：{$error}。如果您接受一个会在启动时被跳过的插件，可以用 `zeroclaw plugin install {$name} --no-verify` 强制安装。
 cli-quickstart-plugins-about-name = 插件 {$name} {$version}
 cli-quickstart-plugins-about-author = 作者：{$author}
 cli-quickstart-plugins-about-description = 描述：{$description}

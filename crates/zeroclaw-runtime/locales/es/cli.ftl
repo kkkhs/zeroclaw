@@ -691,6 +691,7 @@ cli-quickstart-plugins-not-available = {$name} ya no está instalado ni figura e
 cli-quickstart-plugins-no-integrity-hash = Se rechazó {$name}: su entrada del registro no tiene un hash sha256, así que la descarga no se puede verificar. No se instaló nada.
 cli-quickstart-plugins-not-a-tool = Se omitió {$name}: su manifiesto no proporciona ninguna herramienta, y Quickstart solo instala complementos de herramienta. No se instaló nada.
 cli-quickstart-plugins-failed = {$name} no se instaló: {$error}
+cli-quickstart-plugins-load-check-failed = {$name} no se instaló: no se carga en este host: {$error}. Si aceptas un complemento que se omite al iniciar, `zeroclaw plugin install {$name} --no-verify` lo instala de todos modos.
 cli-quickstart-plugins-about-name = Complemento {$name} {$version}
 cli-quickstart-plugins-about-author = Autor: {$author}
 cli-quickstart-plugins-about-description = Descripción: {$description}
