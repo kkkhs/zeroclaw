@@ -690,6 +690,8 @@ enum QuickstartChecklistAction {
     Memory,
     Channels,
     PeerGroups,
+    #[cfg(feature = "plugins-wasm")]
+    Plugins,
     Agent,
     Create,
     Quit,
@@ -941,6 +943,8 @@ mod plugin_registry;
 #[cfg(feature = "plugins-wasm")]
 mod plugins;
 mod providers;
+#[cfg(all(feature = "agent-runtime", feature = "plugins-wasm"))]
+mod quickstart_plugins;
 #[cfg(feature = "agent-runtime")]
 mod relay_cli;
 #[cfg(feature = "agent-runtime")]
@@ -1819,6 +1823,10 @@ async fn run_quickstart_cli(
         // user has actually opened the selector and left it. Until
         // then the row stays `[ ]` rather than a pre-checked default.
         peer_groups_visited: bool,
+        // Optional like Channels: tool plugins picked in the Plugins row.
+        // Nothing is downloaded or written until Create.
+        #[cfg(feature = "plugins-wasm")]
+        plugins: crate::quickstart_plugins::PluginsRow,
         agent: Option<AgentChoice>,
     }
     enum ProviderChoice {
@@ -2072,15 +2080,24 @@ async fn run_quickstart_cli(
                     &peer_groups_summary,
                 ),
             ),
-            (
-                QuickstartChecklistAction::Agent,
-                quickstart_row(
-                    "cli-quickstart-row-agent-identity",
-                    glyph(form.agent_done()),
-                    &agent_summary,
-                ),
-            ),
         ];
+        #[cfg(feature = "plugins-wasm")]
+        choices.push((
+            QuickstartChecklistAction::Plugins,
+            quickstart_row(
+                "cli-quickstart-row-plugins",
+                glyph(form.plugins.visited()),
+                &form.plugins.summary(),
+            ),
+        ));
+        choices.push((
+            QuickstartChecklistAction::Agent,
+            quickstart_row(
+                "cli-quickstart-row-agent-identity",
+                glyph(form.agent_done()),
+                &agent_summary,
+            ),
+        ));
         let create_enabled = form.all_done();
         choices.push((
             QuickstartChecklistAction::Create,
@@ -2665,6 +2682,16 @@ async fn run_quickstart_cli(
                     break;
                 }
             }
+            #[cfg(feature = "plugins-wasm")]
+            QuickstartChecklistAction::Plugins => {
+                // Picking only: nothing is downloaded or written until Create.
+                // Ctrl+C keeps the checklist's exit semantics.
+                let exit =
+                    Box::pin(crate::quickstart_plugins::open_row(&cfg, &mut form.plugins)).await?;
+                if exit == crate::quickstart_plugins::RowExit::Interrupted {
+                    std::process::exit(130);
+                }
+            }
             QuickstartChecklistAction::Agent => {
                 let default_name = form
                     .agent
@@ -2956,6 +2983,28 @@ async fn run_quickstart_cli(
         },
     };
 
+    // Plugins picked in the Plugins row are installed, configured and offered
+    // for activation now, before the agent step. Each one went through the
+    // canonical publish-and-seed transaction by the time this returns, so an
+    // interruption never leaves a package half published.
+    #[cfg(feature = "plugins-wasm")]
+    let plugin_phase = match Box::pin(crate::quickstart_plugins::run_create_phase(
+        &mut cfg,
+        &form.plugins,
+    ))
+    .await
+    {
+        Ok(phase) => phase,
+        Err(halt) => {
+            halt.print_progress();
+            match halt.into_error() {
+                // Ctrl+C keeps the checklist's exit semantics.
+                None => std::process::exit(130),
+                Some(error) => return Err(error),
+            }
+        }
+    };
+
     match Box::pin(apply_with_surface(submission, &mut cfg, Surface::Cli)).await {
         Ok(applied) => {
             println!();
@@ -2970,6 +3019,8 @@ async fn run_quickstart_cli(
             if let Some(auth) = inline_auth {
                 Box::pin(run_inline_provider_auth(auth, &mut cfg)).await;
             }
+            #[cfg(feature = "plugins-wasm")]
+            plugin_phase.print_readiness(&cfg);
             println!();
             println!("{}", t("cli-next-steps", "Next steps:"));
             println!(
@@ -3005,6 +3056,9 @@ async fn run_quickstart_cli(
                 eprintln!("  • {}: {}", quickstart_step_label(e.step), e.message);
             }
             eprintln!();
+            // Plugins run before the agent step, so what they changed stays.
+            #[cfg(feature = "plugins-wasm")]
+            plugin_phase.print_apply_failed_state();
             anyhow::bail!(
                 "{}",
                 qta(
@@ -3755,6 +3809,40 @@ fn print_egress_grant_ceremony(
     );
 }
 
+/// The withheld half of the grant ceremony: a row created with an empty grant
+/// although the manifest declares destinations. One line says so and carries
+/// the exact command that grants the declaration later, so the operator never
+/// has to assemble the opaque instance key themselves. A manifest that
+/// declares nothing had nothing withheld and prints nothing.
+#[cfg(feature = "plugins-wasm")]
+fn print_withheld_egress_grant(
+    config_dir: &std::path::Path,
+    package: &str,
+    instance_key: &str,
+    declared_egress: &[String],
+) {
+    use crate::plugins::egress_ceremony::{canonical_hosts, egress_set_command};
+    let declared = canonical_hosts(declared_egress);
+    if declared.is_empty() {
+        return;
+    }
+    println!(
+        "{}",
+        ta(
+            "cli-quickstart-plugins-egress-withheld",
+            &[
+                ("name", package),
+                ("count", &declared.len().to_string()),
+                (
+                    "command",
+                    &egress_set_command(config_dir, instance_key, &declared)
+                ),
+            ],
+            "Network access was withheld; grant the declared destinations with the printed command."
+        )
+    );
+}
+
 /// Print the declaration-versus-grant difference for an instance row that
 /// already exists, and change nothing. [`existing_egress_grant_lines`] builds
 /// what this prints.
@@ -4276,12 +4364,14 @@ fn render_egress_gap_plan(
 }
 
 /// Seed `[[plugins.entries]]` blocks for a freshly installed plugin's canonical
-/// default instance keys, carrying the manifest's declared egress destinations
-/// into each row this call creates. `config set
-/// plugins.entries.<instance-key>.config.<key>` routes through natural-key path
-/// resolution, which only matches entries already present in live config.
+/// default instance keys. `decision` says what each row this call creates
+/// starts out granting: the manifest's declared egress destinations
+/// (`Declared`, what `plugin install` does), or nothing (`Withheld`). `config
+/// set plugins.entries.<instance-key>.config.<key>` routes through natural-key
+/// path resolution, which only matches entries already present in live config.
 /// Idempotent: existing entries and operator values remain untouched — an
-/// existing row's `egress_hosts` is reported against, never rewritten.
+/// existing row's `egress_hosts` is reported against the real declaration,
+/// never rewritten, whatever the decision.
 /// A pre-typed-config row keyed by the package name is unsupported beta state:
 /// refuse before creating a canonical row and print the same ordered update
 /// guidance as `plugin list` — including its rule that a deployment-wide
@@ -4293,6 +4383,7 @@ async fn seed_plugin_config_entries(
     package: &str,
     entries: &[(zeroclaw::plugins::PluginCapability, String)],
     declared_egress: &[String],
+    decision: crate::plugins::egress_ceremony::EgressDecision,
 ) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
@@ -4368,13 +4459,13 @@ async fn seed_plugin_config_entries(
         }
     }
 
-    // Seed the declaration into the rows just created, before the save, so the
-    // grant lands through the same dirty-path persistence the entry itself
+    // Seed the decided grant into the rows just created, before the save, so
+    // the grant lands through the same dirty-path persistence the entry itself
     // uses — one row per instance carrying both `config` and `egress_hosts`.
     // `egress_hosts` is a plaintext sibling of the `#[secret]` `config` map, so
     // `encrypt_secrets` leaves it readable in the file the operator audits
     // (asserted by `seeded_egress_is_written_plaintext_beside_encrypted_config`).
-    let granted = crate::plugins::egress_ceremony::canonical_hosts(declared_egress);
+    let granted = decision.seeded_hosts(declared_egress);
     if !granted.is_empty() {
         for instance_key in &created {
             config
@@ -4400,12 +4491,24 @@ async fn seed_plugin_config_entries(
                      `zeroclaw config set plugins.entries.<instance-key>.config.<key>`."
                 )
             );
-            print_egress_grant_ceremony(
-                egress_command_config_dir(config),
-                package,
-                instance_key,
-                &granted,
-            );
+            match decision {
+                crate::plugins::egress_ceremony::EgressDecision::Declared => {
+                    print_egress_grant_ceremony(
+                        egress_command_config_dir(config),
+                        package,
+                        instance_key,
+                        &granted,
+                    );
+                }
+                crate::plugins::egress_ceremony::EgressDecision::Withheld => {
+                    print_withheld_egress_grant(
+                        egress_command_config_dir(config),
+                        package,
+                        instance_key,
+                        declared_egress,
+                    );
+                }
+            }
         }
     }
 
@@ -4447,11 +4550,15 @@ async fn seed_plugin_config_entries(
 /// publish *and* the seeding have both succeeded, so the two install paths keep
 /// their distinct user-facing text and a rolled-back install never reports
 /// success first.
+///
+/// `decision` is what a config row this install creates starts out granting;
+/// see [`seed_plugin_config_entries`].
 #[cfg(feature = "plugins-wasm")]
 async fn publish_and_seed_plugin(
     host: &mut zeroclaw::plugins::host::PluginHost,
     config: &mut crate::config::schema::Config,
     admitted: zeroclaw::plugins::host::AdmittedSource,
+    decision: crate::plugins::egress_ceremony::EgressDecision,
     announce_installed: impl FnOnce(&str),
 ) -> Result<()> {
     // A fresh publish: the package is now on disk and in the loaded set. An
@@ -4467,6 +4574,7 @@ async fn publish_and_seed_plugin(
             &name,
             &config_entries,
             &declared,
+            decision,
         ))
         .await?;
         // Only now is the install committed: a seed refusal below rolls the
@@ -10371,6 +10479,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                         &mut host,
                         &mut config,
                         admitted,
+                        crate::plugins::egress_ceremony::EgressDecision::Declared,
                         |_name| {
                             println!(
                                 "{}",
@@ -10406,6 +10515,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                         &mut host,
                         &mut config,
                         admitted,
+                        crate::plugins::egress_ceremony::EgressDecision::Declared,
                         |_name| {
                             println!(
                                 "{}",
@@ -13758,15 +13868,20 @@ mod tests {
     #[test]
     fn quickstart_selector_minimum_width_keeps_actions_identifiable() {
         let budget = quickstart_selector_row_budget(QUICKSTART_SELECTOR_MIN_WIDTH).unwrap();
-        let rows = [
+        let mut rows = vec![
             ("[ ] Model provider — not yet chosen", "[ ] Model"),
             ("[ ] Risk profile — not yet chosen", "[ ] Risk"),
             ("[ ] Memory — not yet chosen", "[ ] Memory"),
             ("[ ] Channels (0) — not yet chosen", "[ ] Channels"),
             ("[ ] Peer groups — not yet chosen", "[ ] Peer"),
+        ];
+        #[cfg(feature = "plugins-wasm")]
+        rows.push(("[ ] Plugins — not yet visited", "[ ] Plugins"));
+        rows.extend([
             ("[ ] Agent identity — not yet chosen", "[ ] Agent"),
             ("── Create agent", "── Create"),
-        ];
+        ]);
+        assert_eq!(rows.len(), QUICKSTART_CHECKLIST_ROWS);
 
         for (row, identifiable_prefix) in rows {
             let fitted = fit_quickstart_selector_row(row, budget);
@@ -13785,24 +13900,41 @@ mod tests {
     /// the real, longer, column-padded row has already collapsed.
     #[cfg(feature = "agent-runtime")]
     fn quickstart_checklist_rows_for_locale(cli_ftl: &str) -> Vec<String> {
-        const ROW_KEYS: [&str; 6] = [
+        let mut row_keys = vec![
             "cli-quickstart-row-model-provider",
             "cli-quickstart-row-risk-profile",
             "cli-quickstart-row-memory",
             "cli-quickstart-row-channels",
             "cli-quickstart-row-peer-groups",
-            "cli-quickstart-row-agent-identity",
         ];
+        #[cfg(feature = "plugins-wasm")]
+        row_keys.push("cli-quickstart-row-plugins");
+        row_keys.push("cli-quickstart-row-agent-identity");
 
-        let value_for = |key: &str| -> String {
-            cli_ftl
-                .lines()
+        let find = |ftl: &str, key: &str| -> Option<String> {
+            ftl.lines()
                 .find_map(|line| line.strip_prefix(&format!("{key} = ")))
+                .map(str::to_string)
+        };
+        let value_for = |key: &str| -> String {
+            find(cli_ftl, key)
+                .or_else(|| {
+                    // The Plugins row is newer than some catalogues. Where a
+                    // locale does not define it yet, the runtime renders the
+                    // English value, so that is the row this checks.
+                    if key == "cli-quickstart-row-plugins" {
+                        find(
+                            include_str!("../crates/zeroclaw-runtime/locales/en/cli.ftl"),
+                            key,
+                        )
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or_else(|| panic!("{key} should be defined in the catalogue"))
-                .to_string()
         };
 
-        let mut rows: Vec<String> = ROW_KEYS
+        let mut rows: Vec<String> = row_keys
             .iter()
             .map(|key| {
                 value_for(key)
@@ -13813,6 +13945,11 @@ mod tests {
         rows.push(value_for("cli-quickstart-create-agent"));
         rows
     }
+
+    /// Checklist rows: five selectors before Plugins, the Plugins row in
+    /// builds with plugin support, Agent identity, and Create.
+    #[cfg(feature = "agent-runtime")]
+    const QUICKSTART_CHECKLIST_ROWS: usize = if cfg!(feature = "plugins-wasm") { 8 } else { 7 };
 
     #[cfg(feature = "agent-runtime")]
     #[test]
@@ -13849,7 +13986,11 @@ mod tests {
 
         for (locale, cli_ftl) in locales {
             let rows = quickstart_checklist_rows_for_locale(cli_ftl);
-            assert_eq!(rows.len(), 7, "{locale}: expected seven checklist rows");
+            assert_eq!(
+                rows.len(),
+                QUICKSTART_CHECKLIST_ROWS,
+                "{locale}: expected {QUICKSTART_CHECKLIST_ROWS} checklist rows"
+            );
 
             for width in 0..=120usize {
                 let Some(budget) = quickstart_selector_row_budget(width) else {
@@ -13928,10 +14069,20 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     #[test]
     fn quickstart_selector_height_prevents_paging_suffixes() {
-        let item_count = 7;
+        let item_count = QUICKSTART_CHECKLIST_ROWS;
         let min_height = quickstart_selector_min_height(item_count);
 
-        assert_eq!(min_height, 9);
+        // The prompt line and the terminal's final line come on top of the
+        // rows: 9 rows of terminal for the 7-row checklist, 10 once the
+        // Plugins row is compiled in.
+        assert_eq!(
+            min_height,
+            if cfg!(feature = "plugins-wasm") {
+                10
+            } else {
+                9
+            }
+        );
         assert!((0..min_height).all(|height| !quickstart_selector_fits_height(height, item_count)));
         assert!(quickstart_selector_fits_height(min_height, item_count));
         assert!(quickstart_selector_fits_height(min_height + 1, item_count));
@@ -14101,15 +14252,20 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     #[test]
     fn quickstart_selection_maps_by_index_when_fitted_labels_are_identical() {
-        let actions = [
+        let mut actions = vec![
             QuickstartChecklistAction::Provider,
             QuickstartChecklistAction::Risk,
             QuickstartChecklistAction::Memory,
             QuickstartChecklistAction::Channels,
             QuickstartChecklistAction::PeerGroups,
+        ];
+        #[cfg(feature = "plugins-wasm")]
+        actions.push(QuickstartChecklistAction::Plugins);
+        actions.extend([
             QuickstartChecklistAction::Agent,
             QuickstartChecklistAction::Create,
-        ];
+        ]);
+        assert_eq!(actions.len(), QUICKSTART_CHECKLIST_ROWS);
         let choices: Vec<(QuickstartChecklistAction, String)> = actions
             .iter()
             .copied()
@@ -18419,6 +18575,7 @@ type = "string"
             "weather-tool",
             &entries,
             &manifest.egress.hosts,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
         )
         .await
         .expect("seeding a fresh entry must succeed");
@@ -18495,6 +18652,7 @@ type = "string"
             "weather-tool",
             &entries,
             &manifest.egress.hosts,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
         )
         .await
         .expect("seeding a fresh entry must succeed");
@@ -18580,9 +18738,15 @@ type = "string"
         let v1 = tool_manifest("weather-tool", &["api.example.com"], true);
         let instance_key = expected_instance_key(&v1);
         let entries = manifest_config_entries(&v1).expect("entries must derive");
-        seed_plugin_config_entries(&mut config, "weather-tool", &entries, &v1.egress.hosts)
-            .await
-            .expect("first install must seed");
+        seed_plugin_config_entries(
+            &mut config,
+            "weather-tool",
+            &entries,
+            &v1.egress.hosts,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
+        )
+        .await
+        .expect("first install must seed");
 
         // v2 of the same package declares an extra destination. Its instance
         // key is unchanged (identity is package/capability/binding, not
@@ -18599,9 +18763,15 @@ type = "string"
             "a version bump must not move the instance key"
         );
         let entries_v2 = manifest_config_entries(&v2).expect("entries must derive");
-        seed_plugin_config_entries(&mut config, "weather-tool", &entries_v2, &v2.egress.hosts)
-            .await
-            .expect("re-seeding an existing entry must not fail");
+        seed_plugin_config_entries(
+            &mut config,
+            "weather-tool",
+            &entries_v2,
+            &v2.egress.hosts,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
+        )
+        .await
+        .expect("re-seeding an existing entry must not fail");
 
         let entry = config
             .plugins
@@ -19449,9 +19619,15 @@ type = "string"
         let manifest = tool_manifest("silent-tool", &[], true);
         let instance_key = expected_instance_key(&manifest);
         let entries = manifest_config_entries(&manifest).expect("entries must derive");
-        seed_plugin_config_entries(&mut config, "silent-tool", &entries, &manifest.egress.hosts)
-            .await
-            .expect("seeding must succeed");
+        seed_plugin_config_entries(
+            &mut config,
+            "silent-tool",
+            &entries,
+            &manifest.egress.hosts,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
+        )
+        .await
+        .expect("seeding must succeed");
 
         let entry = config
             .plugins
@@ -19494,9 +19670,15 @@ type = "string"
 
         let tmp = tempfile::tempdir().expect("temp dir");
         let mut config = config_in_dir(tmp.path());
-        seed_plugin_config_entries(&mut config, "chat-bridge", &entries, &manifest.egress.hosts)
-            .await
-            .expect("seeding nothing must succeed");
+        seed_plugin_config_entries(
+            &mut config,
+            "chat-bridge",
+            &entries,
+            &manifest.egress.hosts,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
+        )
+        .await
+        .expect("seeding nothing must succeed");
         assert!(
             config.plugins.entries.is_empty(),
             "no row may be invented for a channel-only package: {:?}",
@@ -19577,9 +19759,15 @@ type = "string"
 
         // After install seeds it, the operator's own grant lands on the row.
         let mut config = config_in_dir(tmp.path());
-        seed_plugin_config_entries(&mut config, "gitea-tool", &entries, &manifest.egress.hosts)
-            .await
-            .expect("seeding must succeed");
+        seed_plugin_config_entries(
+            &mut config,
+            "gitea-tool",
+            &entries,
+            &manifest.egress.hosts,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
+        )
+        .await
+        .expect("seeding must succeed");
         let entry = config
             .plugins
             .entries
@@ -19653,6 +19841,7 @@ type = "string"
             &mut host,
             &mut config,
             admitted,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
             |_| {},
         ))
         .await
@@ -19676,6 +19865,7 @@ type = "string"
             &mut host,
             &mut config,
             admitted,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
             |_| {},
         ))
         .await
@@ -19737,6 +19927,7 @@ type = "string"
             &mut host,
             &mut config1,
             admitted,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
             |_name| {},
         ))
         .await
@@ -19769,6 +19960,7 @@ type = "string"
             &mut host,
             &mut config2,
             admitted,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
             |_name| {},
         ))
         .await
@@ -19849,6 +20041,7 @@ hosts = ["api.example.com", "api2.example.com"]
             &mut host,
             &mut config,
             admitted,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
             |_name| announced.set(true),
         ))
         .await
@@ -20006,6 +20199,7 @@ hosts = ["api.example.com", "api2.example.com"]
             &mut host,
             &mut config,
             admitted,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
             |_name| announced.set(true),
         ))
         .await
@@ -20051,6 +20245,7 @@ hosts = ["api.example.com", "api2.example.com"]
             &mut host,
             &mut config,
             admitted,
+            crate::plugins::egress_ceremony::EgressDecision::Declared,
             |_name| announced.set(true),
         ))
         .await

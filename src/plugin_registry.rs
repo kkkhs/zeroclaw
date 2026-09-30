@@ -104,10 +104,10 @@ pub(crate) async fn download_registry_entry(
 /// `Default` is the production policy. Tests inject shorter bounds so a
 /// stalled server fails in milliseconds rather than after the real bound.
 #[derive(Clone, Copy, Debug)]
-struct RegistryTimeouts {
-    connect: Duration,
-    index: Duration,
-    archive: Duration,
+pub(crate) struct RegistryTimeouts {
+    pub(crate) connect: Duration,
+    pub(crate) index: Duration,
+    pub(crate) archive: Duration,
 }
 
 impl Default for RegistryTimeouts {
@@ -122,13 +122,13 @@ impl Default for RegistryTimeouts {
 
 /// Every registry request goes through this client, so none of them can run
 /// unbounded.
-struct RegistryClient {
+pub(crate) struct RegistryClient {
     http: reqwest::Client,
     timeouts: RegistryTimeouts,
 }
 
 impl RegistryClient {
-    fn new(timeouts: RegistryTimeouts) -> Result<Self> {
+    pub(crate) fn new(timeouts: RegistryTimeouts) -> Result<Self> {
         let http = reqwest::Client::builder()
             .connect_timeout(timeouts.connect)
             .build()
@@ -136,7 +136,7 @@ impl RegistryClient {
         Ok(Self { http, timeouts })
     }
 
-    async fn fetch_index(&self, registry_url: &str) -> Result<PluginRegistryIndex> {
+    pub(crate) async fn fetch_index(&self, registry_url: &str) -> Result<PluginRegistryIndex> {
         let response = self
             .http
             .get(registry_url)
@@ -159,7 +159,10 @@ impl RegistryClient {
             .context("parsing plugin registry JSON")
     }
 
-    async fn download_entry(&self, entry: &PluginRegistryEntry) -> Result<DownloadedPlugin> {
+    pub(crate) async fn download_entry(
+        &self,
+        entry: &PluginRegistryEntry,
+    ) -> Result<DownloadedPlugin> {
         let bytes = self.download_archive_bytes(&entry.url).await?;
         verify_sha256_if_present(&bytes, entry.sha256.as_deref())?;
 
