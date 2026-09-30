@@ -681,6 +681,7 @@ cli-quickstart-plugins-registry-prompt = Registro de complementos no disponible
 cli-quickstart-plugins-registry-retry = Reintentar
 cli-quickstart-plugins-registry-continue = Continuar sin complementos
 cli-quickstart-plugins-row-failed = No se pudo abrir la lista de complementos: {$error}
+cli-quickstart-plugins-section-unreadable = No se pudo leer la sección [plugins] de {$path}, así que Quickstart no puede instalar complementos. Repara esa sección y vuelve a ejecutar Quickstart para instalarlos.
 cli-quickstart-plugins-none-available = El registro no ofrece complementos de herramienta por ahora.
 cli-quickstart-plugins-select-prompt = Complementos de herramienta para instalar (Espacio marca o desmarca, Enter confirma, Esc para volver)
 cli-quickstart-plugins-choice-available = {$name} {$version}: {$description}

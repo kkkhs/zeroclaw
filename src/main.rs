@@ -4406,6 +4406,23 @@ fn render_egress_gap_plan(
     lines
 }
 
+/// Whether the `[plugins]` section `config` holds stands in for one that could
+/// not be read: the loader found that section malformed, or could not read the
+/// config file at all, and reset it to defaults for this run. Its rows, plugins
+/// directory and signature policy are then the defaults rather than what the
+/// file says, so no config row can be seeded until the file is repaired.
+#[cfg(feature = "plugins-wasm")]
+fn plugins_section_degraded(config: &crate::config::schema::Config) -> bool {
+    config
+        .degraded_security
+        .iter()
+        .any(|section| section == crate::config::migration::WHOLE_CONFIG_SENTINEL)
+        || config
+            .degraded_sections
+            .iter()
+            .any(|section| section == "plugins")
+}
+
 /// Seed `[[plugins.entries]]` blocks for a freshly installed plugin's canonical
 /// default instance keys. `decision` says what each row this call creates
 /// starts out granting: the manifest's declared egress destinations
@@ -4432,11 +4449,7 @@ async fn seed_plugin_config_entries(
         return Ok(());
     }
 
-    let whole_config_degraded = config
-        .degraded_security
-        .iter()
-        .any(|s| s == crate::config::migration::WHOLE_CONFIG_SENTINEL);
-    if whole_config_degraded || config.degraded_sections.iter().any(|s| s == "plugins") {
+    if plugins_section_degraded(config) {
         for (_, instance_key) in entries {
             eprintln!(
                 "{}",

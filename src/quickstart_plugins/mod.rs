@@ -216,7 +216,9 @@ pub(crate) enum RowExit {
 
 /// Open the Plugins row: fetch the registry, list the tool packages, and let
 /// the operator pick. Downloads no package and writes no config; only the
-/// registry index cache is refreshed, as `plugin search` refreshes it.
+/// registry index cache is refreshed, as `plugin search` refreshes it. When
+/// the `[plugins]` section of the config file could not be read, the row says
+/// so before the registry is contacted and offers nothing to pick.
 pub(crate) async fn open_row(config: &Config, row: &mut PluginsRow) -> anyhow::Result<RowExit> {
     let registry = RegistryClient::new(RegistryTimeouts::default())?;
     let registry_url = crate::plugin_registry::registry_url(None);
@@ -237,6 +239,12 @@ async fn open_row_with<P: QuickstartPrompter>(
     registry_url: &str,
     prompter: &mut P,
 ) -> anyhow::Result<RowExit> {
+    if let Some(line) = unreadable_plugins_section_line(config) {
+        prompter.say(&line);
+        row.visited = true;
+        row.selected.clear();
+        return Ok(RowExit::Done);
+    }
     let index = loop {
         match registry.fetch_index(registry_url).await {
             Ok(index) => break index,
@@ -325,6 +333,23 @@ async fn open_row_with<P: QuickstartPrompter>(
         Err(PromptError::Interrupted) => Ok(RowExit::Interrupted),
         Err(PromptError::Failed(error)) => Err(error),
     }
+}
+
+/// The one line the Plugins step shows, in place of anything to pick or
+/// install, when the `[plugins]` section of the config file could not be read
+/// (see [`crate::plugins_section_degraded`]); `None` when it loaded.
+///
+/// The section this run holds is then the defaults, not the operator's: the
+/// install pipeline seeds no config row into it, so a package installed now
+/// could not be configured, and the commands printed for it would fail. The
+/// row and Create both decide here, so they cannot disagree.
+fn unreadable_plugins_section_line(config: &Config) -> Option<String> {
+    crate::plugins_section_degraded(config).then(|| {
+        qta(
+            "cli-quickstart-plugins-section-unreadable",
+            &[("path", &config.config_path.display().to_string())],
+        )
+    })
 }
 
 /// Why the registry index could not be fetched, in Quickstart's terms.
@@ -765,7 +790,8 @@ fn readiness_line(name: &str, verdict: &anyhow::Result<ToolInstanceAdmission>) -
 
 /// Install, configure and offer to activate the packages picked in the
 /// Plugins row. Runs on Create, before the agent step, and does nothing when
-/// the row holds no selection.
+/// the row holds no selection. When the `[plugins]` section of the config
+/// file could not be read, it says so and installs nothing.
 ///
 /// # Errors
 ///
@@ -798,7 +824,8 @@ pub(crate) async fn run_create_phase(
 }
 
 /// The Create-time phase for a non-empty selection: the agent step's dry run,
-/// then the plugins.
+/// then the plugins. Nothing at all when the `[plugins]` section of the
+/// config file could not be read.
 ///
 /// The agent step runs after the plugins, which change the machine. A
 /// submission it would refuse is therefore refused here, while the plugin
@@ -811,6 +838,13 @@ async fn create_phase_with<P: QuickstartPrompter>(
     registry: &RegistryClient,
     prompter: &mut P,
 ) -> Result<CreatePhase, PhaseHalt> {
+    // Checked again rather than trusted from the row: this is the only place
+    // plugins are installed, and the config it installs against decides.
+    if let Some(line) = unreadable_plugins_section_line(config) {
+        prompter.say("");
+        prompter.say(&line);
+        return Ok(CreatePhase::default());
+    }
     zeroclaw_runtime::quickstart::validate_only_with_surface(submission, config, Surface::Cli)
         .map_err(PhaseHalt::AgentRejected)?;
     Box::pin(install_and_activate(config, selection, registry, prompter)).await
@@ -3133,70 +3167,93 @@ capabilities = ["tool"]
         );
     }
 
+    /// A `[plugins]` section the loader could not read, reset to defaults for
+    /// this run: the section alone, or with the whole config file.
+    fn degrade_plugins_section(config: &mut Config, whole_config: bool) {
+        if whole_config {
+            config
+                .degraded_security
+                .push(crate::config::migration::WHOLE_CONFIG_SENTINEL.to_string());
+        } else {
+            config.degraded_sections.push("plugins".to_string());
+        }
+    }
+
     #[tokio::test]
-    async fn a_row_a_degraded_plugins_section_left_unseeded_gets_the_command_that_creates_it() {
-        let server = MockServer::start().await;
-        serve_valid_archive(&server, 1).await;
-        let mut workspace = Workspace::new();
-        // The `[plugins]` section on disk did not load, so the publish seeds
-        // no row for the instance.
-        workspace
-            .config
-            .degraded_sections
-            .push("plugins".to_string());
-        let selection = selection(fixture_entry(&server, Some(archive_digest())));
-        let mut answers = install_answers(GRANT);
-        answers.push(Answer::Confirm(Some(true)));
-        let mut prompter = ScriptedPrompter::new(answers);
+    async fn an_unreadable_plugins_section_offers_nothing_and_installs_nothing() {
+        for whole_config in [false, true] {
+            let server = MockServer::start().await;
+            let entry = fixture_entry(&server, Some(archive_digest()));
+            serve_index(
+                &server,
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "plugins": [entry.clone()] })),
+                0,
+            )
+            .await;
+            serve_valid_archive(&server, 0).await;
+            let mut workspace = Workspace::new();
+            degrade_plugins_section(&mut workspace.config, whole_config);
+            let before = workspace.config_bytes();
+            let unreadable = qta(
+                "cli-quickstart-plugins-section-unreadable",
+                &[("path", &workspace.config.config_path.display().to_string())],
+            );
 
-        let phase = run(&mut workspace, &selection, &mut prompter)
-            .await
-            .expect("the phase completes");
-
-        prompter.assert_done();
-        assert_eq!(
-            phase.outcomes,
-            vec![PackageOutcome::Installed {
-                name: FIXTURE_NAME.to_string(),
-            }]
-        );
-        let key = fixture_instance_key();
-        assert!(workspace.row(&key).is_none(), "no row was seeded");
-        assert_eq!(
-            verdict(&workspace.config),
-            ToolInstanceAdmission::Admitted {
-                instance_key: key.clone()
-            }
-        );
-        let readiness = phase.readiness_lines(&workspace.config).join("\n");
-        let create = empty_grant_create_command(&workspace.config, &key);
-        assert!(
-            readiness.contains(&qta(
-                "cli-quickstart-plugins-ready-no-row",
-                &[("name", FIXTURE_NAME), ("command", &create)]
-            )),
-            "{readiness}"
-        );
-        assert!(
-            readiness.contains(&declared_grant_line_for(
+            // The row says why in one line and offers nothing to pick, before
+            // the registry is contacted.
+            let registry = RegistryClient::new(RegistryTimeouts::default()).expect("client");
+            let registry_url = format!("{}{INDEX_PATH}", server.uri());
+            let mut row = PluginsRow::default();
+            let mut prompter = ScriptedPrompter::new([]);
+            let exit = open_row_with(
                 &workspace.config,
-                FIXTURE_NAME,
-                &key
-            )),
-            "{readiness}"
-        );
-        assert!(
-            !readiness.contains(&format!("plugins.entries.{key}.config.")),
-            "no setting command for a row that does not exist: {readiness}"
-        );
-        assert!(
-            !readiness.contains(&qta(
-                "cli-quickstart-plugins-ready",
-                &[("name", FIXTURE_NAME), ("key", &key)]
-            )),
-            "an instance without its row is not reported active: {readiness}"
-        );
-        server.verify().await;
+                &mut row,
+                &registry,
+                &registry_url,
+                &mut prompter,
+            )
+            .await
+            .expect("the row closes");
+
+            assert_eq!(exit, RowExit::Done, "whole config: {whole_config}");
+            assert_eq!(prompter.said, vec![unreadable.clone()]);
+            assert!(prompter.choice_lists.is_empty(), "nothing is offered");
+            assert!(row.visited() && row.selected.is_empty(), "none is picked");
+
+            // Create, holding a selection the row could not have offered,
+            // publishes nothing and asks nothing.
+            let mut prompter = ScriptedPrompter::new([]);
+            let phase = run(&mut workspace, &selection(entry), &mut prompter)
+                .await
+                .expect("the phase completes");
+
+            assert!(phase.outcomes.is_empty(), "whole config: {whole_config}");
+            assert!(!phase.activation_changed);
+            assert_eq!(prompter.said, vec![String::new(), unreadable]);
+            assert!(
+                prompter.choice_lists.is_empty()
+                    && prompter.confirm_defaults.is_empty()
+                    && prompter.fields.is_empty(),
+                "nothing is asked"
+            );
+            assert!(
+                !workspace.plugins_dir().exists(),
+                "not even the plugins directory was created"
+            );
+            assert!(workspace.config.plugins.entries.is_empty());
+            assert_eq!(workspace.config_bytes(), before);
+            assert!(phase.readiness_lines(&workspace.config).is_empty());
+            assert!(
+                server
+                    .received_requests()
+                    .await
+                    .expect("request recording is on")
+                    .is_empty(),
+                "neither the index nor the archive is requested"
+            );
+            server.verify().await;
+        }
     }
 
     #[tokio::test]

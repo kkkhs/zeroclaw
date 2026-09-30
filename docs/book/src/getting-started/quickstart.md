@@ -92,6 +92,11 @@ changes no config. Opening the row only writes the registry index cache under
 the data directory, as `zeroclaw plugin search` does, and creates the plugins
 directory if it is missing.
 
+If Quickstart could not read the `[plugins]` section of the config file,
+because that section or the whole file is malformed, the row says so instead
+of fetching the registry. It offers nothing to pick, and **Create** installs no
+plugin. Repair the file, then run Quickstart again to install plugins.
+
 When you choose **Create**, Quickstart installs the picked plugins before it
 creates the agent. First it checks the rest of your choices the way the agent
 step will: if the agent step would refuse them, Quickstart reports the problems

@@ -684,6 +684,7 @@ cli-quickstart-plugins-registry-prompt = Registre de plugins indisponible
 cli-quickstart-plugins-registry-retry = Réessayer
 cli-quickstart-plugins-registry-continue = Continuer sans plugins
 cli-quickstart-plugins-row-failed = Impossible d'ouvrir la liste des plugins : {$error}
+cli-quickstart-plugins-section-unreadable = La section [plugins] de {$path} n'a pas pu être lue : Quickstart ne peut donc pas installer de plugins. Réparez cette section, puis relancez Quickstart pour les installer.
 cli-quickstart-plugins-none-available = Le registre ne propose aucun plugin d'outil pour le moment.
 cli-quickstart-plugins-select-prompt = Plugins d'outil à installer (Espace pour cocher ou décocher, Entrée pour valider, Échap pour revenir)
 cli-quickstart-plugins-choice-available = {$name} {$version} : {$description}

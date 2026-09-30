@@ -680,6 +680,7 @@ cli-quickstart-plugins-registry-prompt = 插件注册表不可用
 cli-quickstart-plugins-registry-retry = 重试
 cli-quickstart-plugins-registry-continue = 不安装插件并继续
 cli-quickstart-plugins-row-failed = 无法打开插件列表：{$error}
+cli-quickstart-plugins-section-unreadable = 无法读取 {$path} 中的 [plugins] 部分，因此 Quickstart 无法安装插件。请修复该部分，然后重新运行 Quickstart 进行安装。
 cli-quickstart-plugins-none-available = 注册表目前没有提供工具插件。
 cli-quickstart-plugins-select-prompt = 要安装的工具插件（空格切换，Enter 确认，Esc 返回）
 cli-quickstart-plugins-choice-available = {$name} {$version}：{$description}

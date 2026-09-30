@@ -486,9 +486,12 @@ still apply:
   no when that list goes beyond the plugins the run installed or kept. A
   plugin whose missing row you skipped is not one of them.
 
-Quickstart is stricter than `plugin install` in one respect: it refuses a
+Quickstart is stricter than `plugin install` in two respects. It refuses a
 registry entry that carries no `sha256` digest for its archive instead of
-installing an archive it cannot verify.
+installing an archive it cannot verify. And while the `[plugins]` section of
+the config file cannot be read, it installs nothing, where `plugin install`
+installs the package and only warns that it did not seed the package's
+`[[plugins.entries]]` row.
 
 ## Where the trust boundary actually is
 

@@ -1246,7 +1246,7 @@ mod tests {
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 28] = [
+        let cases: [QuickstartPluginCase<'_>; 29] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1282,6 +1282,13 @@ mod tests {
                 "cli-quickstart-plugins-registry-unpopulated",
                 &[],
                 &["ZEROCLAW_PLUGIN_REGISTRY_URL"],
+            ),
+            // A `[plugins]` section the loader could not read blocks the
+            // step, and the line names the section and the file to repair.
+            (
+                "cli-quickstart-plugins-section-unreadable",
+                &[("path", "/srv/zc/config.toml")],
+                &["[plugins]", "/srv/zc/config.toml"],
             ),
             // A withheld or missing grant hands back the exact command,
             // because the instance key it addresses is opaque.
@@ -1474,7 +1481,7 @@ mod tests {
         // catalogue and interpolates exactly the arguments English does. Each
         // argument is a distinct sentinel, so a catalogue that drops or
         // renames a placeholder fails here by name.
-        const SENTINELS: [(&str, &str); 17] = [
+        const SENTINELS: [(&str, &str); 18] = [
             ("alias", "@@alias@@"),
             ("author", "@@author@@"),
             ("command", "@@command@@"),
@@ -1488,6 +1495,7 @@ mod tests {
             ("max", "@@max@@"),
             ("name", "@@name@@"),
             ("names", "@@names@@"),
+            ("path", "@@path@@"),
             ("registry_version", "@@registry_version@@"),
             ("settings", "@@settings@@"),
             ("summary", "@@summary@@"),

@@ -679,6 +679,7 @@ cli-quickstart-plugins-registry-prompt = プラグインレジストリを利用
 cli-quickstart-plugins-registry-retry = 再試行
 cli-quickstart-plugins-registry-continue = プラグインなしで続行
 cli-quickstart-plugins-row-failed = プラグイン一覧を開けませんでした: {$error}
+cli-quickstart-plugins-section-unreadable = {$path} の [plugins] セクションを読み込めなかったため、クイックスタートはプラグインをインストールできません。このセクションを修復してから、クイックスタートを再実行してインストールしてください。
 cli-quickstart-plugins-none-available = 現在、レジストリが提供しているツールプラグインはありません。
 cli-quickstart-plugins-select-prompt = インストールするツールプラグイン (Spaceで切り替え、Enterで確定、Escで戻る)
 cli-quickstart-plugins-choice-available = {$name} {$version}: {$description}
