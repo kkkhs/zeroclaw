@@ -13935,27 +13935,12 @@ mod tests {
         row_keys.push("cli-quickstart-row-plugins");
         row_keys.push("cli-quickstart-row-agent-identity");
 
-        let find = |ftl: &str, key: &str| -> Option<String> {
-            ftl.lines()
-                .find_map(|line| line.strip_prefix(&format!("{key} = ")))
-                .map(str::to_string)
-        };
         let value_for = |key: &str| -> String {
-            find(cli_ftl, key)
-                .or_else(|| {
-                    // The Plugins row is newer than some catalogues. Where a
-                    // locale does not define it yet, the runtime renders the
-                    // English value, so that is the row this checks.
-                    if key == "cli-quickstart-row-plugins" {
-                        find(
-                            include_str!("../crates/zeroclaw-runtime/locales/en/cli.ftl"),
-                            key,
-                        )
-                    } else {
-                        None
-                    }
-                })
+            cli_ftl
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{key} = ")))
                 .unwrap_or_else(|| panic!("{key} should be defined in the catalogue"))
+                .to_string()
         };
 
         let mut rows: Vec<String> = row_keys
