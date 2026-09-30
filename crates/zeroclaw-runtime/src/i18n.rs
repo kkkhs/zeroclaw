@@ -1242,7 +1242,7 @@ mod tests {
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 24] = [
+        let cases: [QuickstartPluginCase<'_>; 26] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1363,12 +1363,32 @@ mod tests {
                 &[("name", "weather-tool"), ("max", "16")],
                 &["weather-tool", "plugins.max_active_instances", "16"],
             ),
-            // An instance installed without its required settings is never
-            // reported active; the settings it lacks are named.
+            // An instance whose row the runtime's resolver rejects is never
+            // reported active: the resolver's reason is shown, and the
+            // required settings it lacks are named.
+            (
+                "cli-quickstart-plugins-ready-rejected",
+                &[
+                    ("name", "weather-tool"),
+                    (
+                        "error",
+                        "plugin 'weather-tool' config violates config_schema at '/required'",
+                    ),
+                ],
+                &[
+                    "weather-tool",
+                    "plugin 'weather-tool' config violates config_schema at '/required'",
+                ],
+            ),
             (
                 "cli-quickstart-plugins-ready-missing-settings",
                 &[("name", "weather-tool"), ("keys", "api_key, units")],
                 &["weather-tool", "api_key, units"],
+            ),
+            (
+                "cli-quickstart-plugins-ready-missing-unsettable",
+                &[("name", "weather-tool"), ("keys", "proxy url")],
+                &["weather-tool", "proxy url"],
             ),
             // `config set` resolves only rows that exist, so an instance
             // without the row it is owed gets the command that creates it,

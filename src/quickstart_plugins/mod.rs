@@ -39,7 +39,7 @@ use model::{
     ConfigField, FailureStage, PackageOutcome, PluginChoice, Refusal, ValueKind,
     activation_preview, capability_names, config_fields, encode_value, field_descriptor,
     missing_required_settings, permission_names, plugin_choices, terminal_safe,
-    terminal_safe_detail,
+    terminal_safe_detail, unsettable_required_settings,
 };
 
 /// Why a prompt produced no answer.
@@ -535,13 +535,15 @@ impl CreatePhase {
 /// One installed package's readiness lines, read from `host` and `config`.
 ///
 /// A verdict that holds the instance back is reported first. Whatever the
-/// verdict, an instance whose config row lacks a required setting is rejected
-/// on every call, so it is never reported as active: its line names the
-/// missing settings and gives the command that sets each one. An instance
-/// whose manifest owes it a row that does not exist is not reported active
-/// either, and gets no `config set` command, which resolves only rows that
-/// exist: its line gives the command that creates the row. When the row
-/// cannot be read, the status is reported unavailable rather than active.
+/// verdict, the instance is reported active only when the runtime's own
+/// resolver accepts the row it reads, under the scope the activation plan
+/// grants it: a row the resolver rejects fails every call. The resolver's
+/// reason is then shown once, followed by the required settings the row
+/// lacks, each with its `config set` command when that command can write it.
+/// An instance whose manifest owes it a row that does not exist gets no
+/// `config set` command, which resolves only rows that exist: its line gives
+/// the command that creates the row. When the row cannot be read, the status
+/// is reported unavailable rather than active.
 fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<String> {
     let verdict = zeroclaw_runtime::plugin_runtime::tool_instance_admission(config, host, name)
         .map_err(anyhow::Error::from);
@@ -550,6 +552,7 @@ fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<Stri
     if !admitted {
         lines.push(indented(&readiness_line(name, &verdict)));
     }
+    let display_name = terminal_safe(name);
     match instance_settings(config, host, name) {
         Ok(InstanceSettings::NoRow { instance_key }) => {
             // The same command a skipped row is created with: the row, with
@@ -561,67 +564,92 @@ fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<Stri
             );
             lines.push(indented(&qta(
                 "cli-quickstart-plugins-ready-no-row",
-                &[("name", &terminal_safe(name)), ("command", &command)],
+                &[("name", &display_name), ("command", &command)],
             )));
         }
-        Ok(InstanceSettings::Row {
+        Ok(InstanceSettings::Rejected {
             instance_key,
-            missing,
-        }) if !missing.is_empty() => {
+            settable,
+            unsettable,
+            reason,
+        }) => {
             lines.push(indented(&qta(
-                "cli-quickstart-plugins-ready-missing-settings",
+                "cli-quickstart-plugins-ready-rejected",
                 &[
-                    ("name", &terminal_safe(name)),
-                    ("keys", &missing.join(", ")),
+                    ("name", &display_name),
+                    ("error", &terminal_safe_detail(&reason)),
                 ],
             )));
-            // Instance settings are secret, so `config set` asks for each
-            // value with masked input and the command carries none.
-            lines.extend(missing.iter().map(|key| {
-                indented(&indented(&zeroclaw_command(
-                    config,
-                    &format!("config set {}", setting_path(&instance_key, key)),
-                )))
-            }));
+            if !settable.is_empty() {
+                lines.push(indented(&qta(
+                    "cli-quickstart-plugins-ready-missing-settings",
+                    &[("name", &display_name), ("keys", &settable.join(", "))],
+                )));
+                // Instance settings are secret, so `config set` asks for each
+                // value with masked input and the command carries none.
+                lines.extend(settable.iter().map(|key| {
+                    indented(&indented(&zeroclaw_command(
+                        config,
+                        &format!("config set {}", setting_path(&instance_key, key)),
+                    )))
+                }));
+            }
+            if !unsettable.is_empty() {
+                lines.push(indented(&qta(
+                    "cli-quickstart-plugins-ready-missing-unsettable",
+                    &[("name", &display_name), ("keys", &unsettable.join(", "))],
+                )));
+            }
         }
         // The active line names the instance's config entry, which a tool
         // that owns no state never gets.
-        Ok(InstanceSettings::NoRowNeeded) if admitted => lines.push(indented(&qta(
+        Ok(InstanceSettings::AcceptedWithoutRow) if admitted => lines.push(indented(&qta(
             "cli-quickstart-plugins-ready-no-entry-needed",
-            &[("name", &terminal_safe(name))],
+            &[("name", &display_name)],
         ))),
-        Ok(_) if admitted => lines.push(indented(&readiness_line(name, &verdict))),
+        Ok(InstanceSettings::Accepted) if admitted => {
+            lines.push(indented(&readiness_line(name, &verdict)));
+        }
         Ok(_) => {}
         Err(error) => lines.push(indented(&readiness_line(name, &Err(error)))),
     }
     lines
 }
 
-/// Where `name`'s tool instance reads its settings from, as the plugins
-/// directory and the config hold them now.
+/// What the runtime's resolver makes of `name`'s tool instance settings, as
+/// the plugins directory and the config hold them now.
 enum InstanceSettings {
     /// The package is not installed, or provides no tool.
     NoInstance,
-    /// The manifest owns no settings and no network reach, so install seeds
-    /// no row for the instance and it needs none.
-    NoRowNeeded,
     /// The manifest owes the instance a row, and the config holds none.
     NoRow { instance_key: String },
-    /// The row exists; `missing` are the required settings it leaves unset.
-    Row {
+    /// The manifest owns no settings and no network reach, so install seeds
+    /// no row for the instance, and the resolver accepts it without one.
+    AcceptedWithoutRow,
+    /// The resolver accepts the instance's row.
+    Accepted,
+    /// The resolver rejects the instance's row, so every call fails.
+    Rejected {
         instance_key: String,
-        missing: Vec<String>,
+        /// Required settings the row lacks that `config set` can write.
+        settable: Vec<String>,
+        /// Every other required name the row lacks, terminal-safe.
+        unsettable: Vec<String>,
+        /// The resolver's reason, which names properties and schema paths,
+        /// never values.
+        reason: String,
     },
 }
 
-/// Read `name`'s tool instance settings from the manifest `host` admitted and
-/// the row `config` holds under the instance key install seeds, so an
-/// instance held back today still reports what it lacks.
+/// Resolve `name`'s tool instance settings as the runtime does on every call:
+/// the manifest `host` admitted, the scope the activation plan grants the
+/// instance, and the row `config` holds under its key. The verdict does not
+/// matter, so an instance held back today still reports what it lacks.
 ///
 /// # Errors
 ///
-/// When more than one row holds the instance key, or the key cannot be
-/// derived from the manifest.
+/// When more than one row holds the instance key, or the scope or its key
+/// cannot be derived from the manifest.
 fn instance_settings(
     config: &Config,
     host: &PluginHost,
@@ -633,19 +661,35 @@ fn instance_settings(
     else {
         return Ok(InstanceSettings::NoInstance);
     };
-    let tool_row = crate::manifest_config_entries(manifest)?
-        .into_iter()
-        .find_map(|(capability, key)| (capability == PluginCapability::Tool).then_some(key));
-    let Some(instance_key) = tool_row else {
-        return Ok(InstanceSettings::NoRowNeeded);
-    };
-    Ok(match config.plugins.entry_config(&instance_key)? {
-        None => InstanceSettings::NoRow { instance_key },
-        Some(row) => InstanceSettings::Row {
-            missing: missing_required_settings(manifest, Some(row)),
-            instance_key,
+    let scope = tool_instance_scope(manifest)?;
+    let instance_key = scope.id().config_entry_key()?;
+    let row = config.plugins.entry_config(&instance_key)?;
+    if row.is_none() && !crate::manifest_config_entries(manifest)?.is_empty() {
+        return Ok(InstanceSettings::NoRow { instance_key });
+    }
+    Ok(
+        match zeroclaw::plugins::config::resolve_plugin_config(manifest, &scope, row) {
+            Ok(_) if row.is_none() => InstanceSettings::AcceptedWithoutRow,
+            Ok(_) => InstanceSettings::Accepted,
+            Err(error) => InstanceSettings::Rejected {
+                settable: missing_required_settings(manifest, row),
+                unsettable: unsettable_required_settings(manifest, row),
+                reason: error.to_string(),
+                instance_key,
+            },
         },
-    })
+    )
+}
+
+/// The scope the activation plan admits `manifest`'s tool instance under: the
+/// package binding, holding every permission the manifest requests. A row
+/// resolved under it is read as the running instance reads it.
+fn tool_instance_scope(manifest: &PluginManifest) -> anyhow::Result<PluginInstanceScope> {
+    Ok(PluginInstanceScope::for_package_binding(
+        manifest,
+        PluginCapability::Tool,
+        manifest.permissions.iter().copied(),
+    )?)
 }
 
 fn readiness_line(name: &str, verdict: &anyhow::Result<ToolInstanceAdmission>) -> String {
@@ -1451,12 +1495,7 @@ fn validate_settings(
     manifest: &PluginManifest,
     values: &BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let scope = PluginInstanceScope::for_package_binding(
-        manifest,
-        PluginCapability::Tool,
-        manifest.permissions.iter().copied(),
-    )
-    .map_err(|error| error.to_string())?;
+    let scope = tool_instance_scope(manifest).map_err(|error| error.to_string())?;
     let configured: HashMap<String, String> = values
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
@@ -2077,9 +2116,22 @@ hosts = ["api.example.com"]
             .expect("the activation plan builds")
     }
 
+    /// The prefix of the line that reports a row the resolver rejects, up to
+    /// the resolver's reason.
+    fn rejected_prefix(name: &str) -> String {
+        let line = qta(
+            "cli-quickstart-plugins-ready-rejected",
+            &[("name", name), ("error", "<error>")],
+        );
+        let (prefix, _) = line
+            .split_once("<error>")
+            .expect("the line carries the resolver's reason");
+        prefix.to_string()
+    }
+
     /// The fixture's status after Create when its row lacks both required
-    /// settings: never active, the two settings named, and one command per
-    /// setting that carries no value.
+    /// settings: never active, the resolver's reason once, the two settings
+    /// named, and one command per setting that carries no value.
     fn assert_reported_missing(readiness: &[String], key: &str) {
         let text = readiness.join("\n");
         assert!(
@@ -2088,6 +2140,16 @@ hosts = ["api.example.com"]
                 &[("name", FIXTURE_NAME), ("key", key)]
             )),
             "an instance the resolver rejects is not reported active: {text}"
+        );
+        assert_eq!(
+            readiness
+                .iter()
+                .filter(|line| line
+                    .trim_start()
+                    .starts_with(&rejected_prefix(FIXTURE_NAME)))
+                .count(),
+            1,
+            "the resolver's reason is shown once: {text}"
         );
         assert!(
             text.contains(&qta(
@@ -3212,6 +3274,144 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
                 &[("name", FIXTURE_NAME), ("key", &key)]
             )),
             "{readiness:?}"
+        );
+    }
+
+    #[test]
+    fn a_row_with_every_required_key_but_a_value_the_schema_rejects_is_not_reported_active() {
+        let mut workspace = Workspace::new();
+        install_without_a_row(&workspace);
+        workspace.config.plugins.enabled = true;
+        workspace.config.plugins.auto_discover = true;
+        let key = fixture_instance_key();
+        let bad_value = "not-a-number-3d9a";
+        // Both required settings are present; the optional integer holds text,
+        // which the resolver refuses on every call.
+        workspace
+            .config
+            .plugins
+            .entries
+            .push(crate::config::schema::PluginEntryConfig {
+                name: key.clone(),
+                config: HashMap::from([
+                    ("api_token".to_string(), "x".to_string()),
+                    ("label".to_string(), "demo".to_string()),
+                    ("max_len".to_string(), bad_value.to_string()),
+                ]),
+                ..Default::default()
+            });
+        let phase = CreatePhase {
+            outcomes: vec![PackageOutcome::AlreadyInstalled {
+                name: FIXTURE_NAME.to_string(),
+                seeded_row: false,
+            }],
+            activation_changed: false,
+        };
+
+        let readiness = phase.readiness_lines(&workspace.config);
+
+        assert_eq!(
+            verdict(&workspace.config),
+            ToolInstanceAdmission::Admitted {
+                instance_key: key.clone()
+            },
+            "the activation plan alone would admit the instance"
+        );
+        let text = readiness.join("\n");
+        assert!(
+            !text.contains(&qta(
+                "cli-quickstart-plugins-ready",
+                &[("name", FIXTURE_NAME), ("key", &key)]
+            )),
+            "{text}"
+        );
+        let reason = readiness.get(2).expect("the package's status line");
+        assert!(
+            reason
+                .trim_start()
+                .starts_with(&rejected_prefix(FIXTURE_NAME))
+                && reason.contains("max_len"),
+            "the resolver's reason names the property: {text}"
+        );
+        assert!(
+            !text.contains("config set"),
+            "no required setting is missing, so there is no command: {text}"
+        );
+        assert!(
+            !text.contains(bad_value),
+            "values are never printed: {text}"
+        );
+    }
+
+    #[test]
+    fn a_required_setting_no_command_can_write_is_named_without_one() {
+        let manifest = r#"name = "strict-tool"
+version = "0.1.0"
+wasm_path = "tool-fixture.wasm"
+capabilities = ["tool"]
+permissions = ["config_read"]
+
+[config_schema]
+"$schema" = "https://json-schema.org/draft/2020-12/schema"
+type = "object"
+additionalProperties = false
+required = ["api_token", "bad key"]
+
+[config_schema.properties.api_token]
+type = "string"
+x-secret = true
+
+[config_schema.properties."bad key"]
+type = "string"
+"#;
+        let mut workspace = Workspace::new();
+        install_with_manifest(&workspace, "strict-tool", manifest);
+        workspace.config.plugins.enabled = true;
+        workspace.config.plugins.auto_discover = true;
+        let key = instance_key_of(manifest);
+        // The one required key a portable path can reach is set.
+        workspace
+            .config
+            .plugins
+            .entries
+            .push(crate::config::schema::PluginEntryConfig {
+                name: key.clone(),
+                config: HashMap::from([("api_token".to_string(), "x".to_string())]),
+                ..Default::default()
+            });
+        let phase = CreatePhase {
+            outcomes: vec![PackageOutcome::Installed {
+                name: "strict-tool".to_string(),
+            }],
+            activation_changed: false,
+        };
+
+        let readiness = phase.readiness_lines(&workspace.config);
+
+        let text = readiness.join("\n");
+        assert!(
+            !text.contains(&qta(
+                "cli-quickstart-plugins-ready",
+                &[("name", "strict-tool"), ("key", &key)]
+            )),
+            "an instance the resolver rejects is not reported active: {text}"
+        );
+        assert!(
+            readiness.iter().any(|line| line
+                .trim_start()
+                .starts_with(&rejected_prefix("strict-tool"))),
+            "{text}"
+        );
+        assert!(
+            readiness.contains(&indented(&qta(
+                "cli-quickstart-plugins-ready-missing-unsettable",
+                &[("name", "strict-tool"), ("keys", "bad key")]
+            ))),
+            "the setting is named: {text}"
+        );
+        assert!(
+            !text.contains("config set"),
+            "no command is printed for a name `config set` cannot write: {text}"
         );
     }
 

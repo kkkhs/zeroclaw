@@ -466,14 +466,20 @@ pub(crate) fn encode_value(field: &ConfigField, raw: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// The required settings an instance's config row leaves unset.
+/// The required settings an instance's config row leaves unset that
+/// `config set plugins.entries.<key>.config.<name>` can write, so each one
+/// gets that command.
 ///
-/// A required setting is a name in the schema's root `required` list that the
-/// root `properties` map declares and that is a portable plugin key: one that
-/// `config set plugins.entries.<key>.config.<name>` can write. It counts as
-/// set when the row holds its key, whatever the value, because `required`
-/// asks only for presence; values are never read here. With no row, every
-/// required setting is unset. Sorted, without duplicates.
+/// These are the names in the schema's root `required` list that the root
+/// `properties` map declares and that are portable plugin keys. Any other
+/// required name is left out; [`unsettable_required_settings`] lists those.
+/// A name counts as set when the row holds its key, whatever the value; values
+/// are never read here. With no row, every such setting is unset. Sorted,
+/// without duplicates.
+///
+/// This only names what to set. Whether the instance can use its row is the
+/// runtime resolver's decision: a row this reports complete can still hold a
+/// value its schema rejects.
 #[must_use]
 pub(crate) fn missing_required_settings(
     manifest: &PluginManifest,
@@ -498,6 +504,37 @@ pub(crate) fn missing_required_settings(
         })
         .collect();
     missing.into_iter().map(str::to_string).collect()
+}
+
+/// The required names an instance's config row lacks that
+/// [`missing_required_settings`] leaves out: a name that is not a portable
+/// plugin key, which no `config set` path addresses, or one the root
+/// `properties` map does not declare, which the resolver refuses whatever its
+/// value. Quickstart names them and prints no command for them. Publisher
+/// text, so each is made terminal-safe. Sorted, without duplicates.
+#[must_use]
+pub(crate) fn unsettable_required_settings(
+    manifest: &PluginManifest,
+    configured: Option<&HashMap<String, String>>,
+) -> Vec<String> {
+    let Some(schema) = manifest.config_schema.as_ref() else {
+        return Vec::new();
+    };
+    let properties = schema.get("properties").and_then(Value::as_object);
+    let unsettable: BTreeSet<String> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|name| {
+            let settable = properties.is_some_and(|properties| properties.contains_key(*name))
+                && zeroclaw_api::plugin_key::is_valid_portable_plugin_key(name);
+            !settable && configured.is_none_or(|row| !row.contains_key(*name))
+        })
+        .map(terminal_safe)
+        .collect();
+    unsettable.into_iter().collect()
 }
 
 /// Snake-case names of a manifest's capabilities, as manifests spell them.
@@ -1161,6 +1198,30 @@ mod tests {
             "a non-portable name and a name `properties` does not declare are left out, \
              and the rest are sorted once each"
         );
+    }
+
+    #[test]
+    fn unsettable_required_settings_name_the_rest_of_the_required_list() {
+        let manifest = manifest_with(Some(json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["zone", "bad key", "undeclared", "bad key", "\u{1b}[31mred"],
+            "properties": {
+                "bad key": { "type": "string" },
+                "zone": { "type": "string" }
+            }
+        })));
+        assert_eq!(
+            unsettable_required_settings(&manifest, None),
+            vec!["bad key", "red", "undeclared"],
+            "every required name no command can set, terminal-safe, once each"
+        );
+        assert_eq!(
+            unsettable_required_settings(&manifest, Some(&row(&["bad key", "zone"], "x"))),
+            vec!["red", "undeclared"],
+            "a name the row holds is not missing"
+        );
+        assert!(unsettable_required_settings(&manifest_with(None), None).is_empty());
     }
 
     #[test]
