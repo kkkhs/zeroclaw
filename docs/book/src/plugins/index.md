@@ -464,11 +464,13 @@ still apply:
 
 - **Declaration versus grant.** Quickstart shows you the manifest's `[egress]`
   declaration, which grants nothing by itself. Whenever it creates a row for a
-  package that declares destinations, you choose whether the new row grants
-  them, whether the package is new or was already installed without its row;
-  installing without network access leaves `egress_hosts` empty and prints the
-  command that grants them later. Skipping an already installed package leaves
-  its row absent and prints the command that creates it.
+  package whose manifest requests `http_client` and declares destinations, the
+  only declaration a created row is seeded with, you choose whether the new
+  row grants them, whether the package is new or was already installed
+  without its row. The question starts on installing without network access,
+  which leaves `egress_hosts` empty and prints the command that grants the
+  destinations later. Skipping an already installed package leaves its row
+  absent and prints the command that creates it.
 - **An existing row is never extended.** When the instance's
   `[[plugins.entries]]` row already exists, Quickstart leaves its
   `egress_hosts`, `egress_allow_private`, and settings exactly as they are. It

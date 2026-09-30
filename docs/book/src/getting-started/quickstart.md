@@ -115,12 +115,14 @@ plugins one at a time, through the pipeline `zeroclaw plugin install` uses:
    first.
 4. For a plugin that requests `http_client` and declares destinations, you
    choose to grant the declared destinations, install without network access,
-   or skip the plugin. Installing without network access creates the plugin's
-   config entry with an empty `egress_hosts`, so the plugin reaches nothing,
-   and prints the exact `zeroclaw config set` command that grants the declared
-   destinations later. A plugin that requests network access but declares no
-   destinations gets no question; after installing it, Quickstart prints the
-   grant command with a `<host>` placeholder to fill in.
+   or skip the plugin. The choice starts on installing without network access,
+   so accepting it as offered grants nothing. Installing without network
+   access creates the plugin's config entry with an empty `egress_hosts`, so
+   the plugin reaches nothing, and prints the exact `zeroclaw config set`
+   command that grants the declared destinations later. A plugin that requests
+   network access but declares no destinations gets no question; after
+   installing it, Quickstart prints the grant command with a `<host>`
+   placeholder to fill in.
 5. For a plugin whose manifest has a `config_schema`, Quickstart prompts for
    the settings it describes: required properties first, optional ones only if
    you ask for them. Properties marked `x-secret` are masked as you type them.

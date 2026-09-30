@@ -1378,6 +1378,10 @@ fn egress_decision<P: QuickstartPrompter>(
     manifest: &PluginManifest,
     prompter: &mut P,
 ) -> PromptResult<Option<EgressDecision>> {
+    // The answers, in the order the question lists them.
+    const GRANT: usize = 0;
+    const WITHHOLD: usize = 1;
+
     if !asks_for_egress(manifest) {
         return Ok(Some(EgressDecision::Declared));
     }
@@ -1390,9 +1394,12 @@ fn egress_decision<P: QuickstartPrompter>(
         "cli-quickstart-plugins-egress-prompt",
         &[("name", &terminal_safe(&manifest.name))],
     );
-    Ok(match prompter.select(&prompt, &options, 0)? {
-        Some(0) => Some(EgressDecision::Declared),
-        Some(1) => Some(EgressDecision::Withheld),
+    // A new external surface starts closed: the cursor rests on installing
+    // without network access, so accepting the default grants a publisher's
+    // destinations nothing.
+    Ok(match prompter.select(&prompt, &options, WITHHOLD)? {
+        Some(GRANT) => Some(EgressDecision::Declared),
+        Some(WITHHOLD) => Some(EgressDecision::Withheld),
         Some(_) | None => None,
     })
 }
@@ -1985,6 +1992,7 @@ hosts = ["api.example.com"]
         said: Vec<String>,
         fields: Vec<FieldDescriptor>,
         confirm_defaults: Vec<bool>,
+        select_defaults: Vec<usize>,
         choice_lists: Vec<Vec<String>>,
     }
 
@@ -2020,9 +2028,10 @@ hosts = ["api.example.com"]
             &mut self,
             prompt: &str,
             items: &[String],
-            _default: usize,
+            default: usize,
         ) -> PromptResult<Option<usize>> {
             self.choice_lists.push(items.to_vec());
+            self.select_defaults.push(default);
             match self.next(prompt) {
                 Answer::Select(answer) => Ok(answer),
                 Answer::Interrupt => Err(PromptError::Interrupted),
@@ -2226,6 +2235,11 @@ hosts = ["api.example.com"]
             prompter.choice_lists[0].len(),
             3,
             "grant, withhold or skip is offered for a declared destination"
+        );
+        assert_eq!(
+            prompter.select_defaults,
+            vec![WITHHOLD],
+            "the question starts closed, on installing without network access"
         );
         assert!(
             workspace.package_dir().join("manifest.toml").is_file(),
@@ -2657,6 +2671,11 @@ hosts = ["api.example.com"]
                 prompter.choice_lists[0].len(),
                 3,
                 "the fresh-install question is asked"
+            );
+            assert_eq!(
+                prompter.select_defaults,
+                vec![WITHHOLD],
+                "the question starts closed, as for a fresh install"
             );
             let output = prompter.output();
             assert!(
