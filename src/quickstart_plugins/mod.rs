@@ -1620,7 +1620,6 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::path::PathBuf;
-    use std::process::Command;
     use std::sync::OnceLock;
     use std::time::Duration;
 
@@ -1630,6 +1629,8 @@ mod tests {
     use zeroclaw::plugins::catalog::package_catalog;
     use zeroclaw::plugins::registry::{PluginRegistryEntry, PluginRegistryIndex};
     use zeroclaw_runtime::quickstart::QuickstartStep;
+
+    use crate::tests::tool_component_fixture;
 
     const FIXTURE_NAME: &str = "tool-fixture";
     const FIXTURE_VERSION: &str = "0.1.0";
@@ -1673,63 +1674,14 @@ minimum = 0
 hosts = ["api.example.com"]
 "#;
 
-    /// This test binary sits at `<target>/<profile>/deps/<name>`, so its own
-    /// path locates the target directory even when `CARGO_TARGET_DIR` moved
-    /// it.
-    fn cargo_target_dir() -> PathBuf {
-        let exe = std::env::current_exe().expect("test binary path");
-        exe.ancestors()
-            .nth(3)
-            .expect("test binary should sit under <target>/<profile>/deps/")
-            .to_path_buf()
-    }
-
-    /// Build the in-tree tool component once per test process.
-    ///
-    /// It shares its target directory with the plugin load-check tests in
-    /// `main.rs`, which build the same package with the same arguments: the
-    /// component is built once per target directory, and Cargo's build lock
-    /// serializes the two if they race. There is no skip path; a fixture that
-    /// cannot be built fails the test.
-    fn tool_fixture_wasm() -> PathBuf {
-        static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
-        FIXTURE
-            .get_or_init(|| {
-                let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("crates/zeroclaw-plugins/tests/fixtures/tool-fixture");
-                let target_dir = cargo_target_dir().join("tmp/plugin-load-check-fixture");
-                let status = Command::new(env!("CARGO"))
-                    .current_dir(&fixture_dir)
-                    .args([
-                        "build",
-                        "--locked",
-                        "--quiet",
-                        "--package",
-                        "zeroclaw-tool-plugin-fixture",
-                        "--target",
-                        "wasm32-wasip2",
-                        "--target-dir",
-                    ])
-                    .arg(&target_dir)
-                    .status()
-                    .expect("run Cargo for the tool component fixture");
-                assert!(
-                    status.success(),
-                    "tool fixture must build; install the wasm32-wasip2 target"
-                );
-                let wasm = target_dir.join("wasm32-wasip2/debug/zeroclaw_tool_plugin_fixture.wasm");
-                assert!(wasm.is_file(), "tool fixture WASM was not produced");
-                wasm
-            })
-            .clone()
-    }
-
-    /// The zipped package, laid out as a registry release ships it.
+    /// The zipped package, laid out as a registry release ships it, around the
+    /// in-tree tool component the binary's plugin tests share.
     fn archive() -> &'static [u8] {
         static ARCHIVE: OnceLock<Vec<u8>> = OnceLock::new();
         ARCHIVE.get_or_init(|| {
             use std::io::Write as _;
-            let wasm = std::fs::read(tool_fixture_wasm()).expect("read the fixture component");
+            let wasm =
+                std::fs::read(tool_component_fixture::wasm()).expect("read the fixture component");
             let mut bytes = std::io::Cursor::new(Vec::new());
             {
                 let mut writer = zip::ZipWriter::new(&mut bytes);
@@ -2301,16 +2253,37 @@ hosts = ["api.example.com"]
 
     #[tokio::test]
     async fn a_bad_digest_a_server_error_or_a_stalled_download_changes_nothing() {
-        let cases: [(&str, ResponseTemplate, Option<String>); 3] = [
+        // Only the stalled download runs against a short bound. The other
+        // two fail on their own, and each has to say why rather than pass by
+        // timing out under load.
+        let stall_bound = RegistryTimeouts {
+            archive: Duration::from_millis(300),
+            ..RegistryTimeouts::default()
+        };
+        /// One failed download: its name, the archive response, the digest
+        /// the registry entry carries, the request bounds, and the cause the
+        /// report must name.
+        type DownloadCase = (
+            &'static str,
+            ResponseTemplate,
+            Option<String>,
+            RegistryTimeouts,
+            &'static str,
+        );
+        let cases: [DownloadCase; 3] = [
             (
                 "digest mismatch",
                 ResponseTemplate::new(200).set_body_bytes(archive().to_vec()),
                 Some("0".repeat(64)),
+                RegistryTimeouts::default(),
+                "sha256 mismatch",
             ),
             (
                 "HTTP 500",
                 ResponseTemplate::new(500),
                 Some(archive_digest()),
+                RegistryTimeouts::default(),
+                "HTTP 500",
             ),
             (
                 "stalled",
@@ -2318,9 +2291,11 @@ hosts = ["api.example.com"]
                     .set_body_bytes(archive().to_vec())
                     .set_delay(Duration::from_secs(10)),
                 Some(archive_digest()),
+                stall_bound,
+                "timed out",
             ),
         ];
-        for (case, response, digest) in cases {
+        for (case, response, digest, timeouts, cause) in cases {
             let server = MockServer::start().await;
             serve_archive(&server, response, 1).await;
             let mut workspace = Workspace::new();
@@ -2328,17 +2303,9 @@ hosts = ["api.example.com"]
             let selection = selection(fixture_entry(&server, digest));
             let mut prompter = ScriptedPrompter::new([]);
 
-            let phase = run_with_timeouts(
-                &mut workspace,
-                &selection,
-                RegistryTimeouts {
-                    archive: Duration::from_millis(300),
-                    ..RegistryTimeouts::default()
-                },
-                &mut prompter,
-            )
-            .await
-            .expect("the phase completes");
+            let phase = run_with_timeouts(&mut workspace, &selection, timeouts, &mut prompter)
+                .await
+                .expect("the phase completes");
 
             assert_eq!(
                 phase.outcomes,
@@ -2347,6 +2314,11 @@ hosts = ["api.example.com"]
                     stage: FailureStage::Download,
                 }],
                 "{case}"
+            );
+            let output = prompter.output();
+            assert!(
+                output.contains(cause),
+                "{case}: the failure names its cause: {output}"
             );
             assert!(workspace.installed_packages().is_empty(), "{case}");
             assert!(workspace.config.plugins.entries.is_empty(), "{case}");
@@ -2433,8 +2405,11 @@ hosts = ["api.example.com"]
     fn install_without_a_row(workspace: &Workspace) {
         let source = workspace.dir.path().join("source").join(FIXTURE_NAME);
         std::fs::create_dir_all(&source).expect("package source directory");
-        std::fs::copy(tool_fixture_wasm(), source.join("tool-fixture.wasm"))
-            .expect("copy the component");
+        std::fs::copy(
+            tool_component_fixture::wasm(),
+            source.join("tool-fixture.wasm"),
+        )
+        .expect("copy the component");
         std::fs::write(source.join("manifest.toml"), FIXTURE_MANIFEST).expect("write the manifest");
         let mut host =
             crate::plugin_host_with_configured_security(&workspace.config).expect("plugin host");
@@ -2522,6 +2497,9 @@ hosts = ["api.example.com"]
         let plugins_dir = toml::Value::String(dir.path().join("plugins").display().to_string());
         // A row left behind by `plugin remove`, holding encrypted settings and
         // a grant, next to a 1Password reference and activation already on.
+        // The grant names a host the manifest does not declare, so extending
+        // it with the declaration could not go unnoticed.
+        let unrelated_host = "unrelated.example.org";
         let text = format!(
             r#"schema_version = {version}
 
@@ -2536,7 +2514,7 @@ plugins_dir = {plugins_dir}
 
 [[plugins.entries]]
 name = "{key}"
-egress_hosts = ["{DECLARED_HOST}"]
+egress_hosts = ["{unrelated_host}"]
 
 [plugins.entries.config]
 api_token = "enc2:bm90LWEtcmVhbC1jaXBoZXJ0ZXh0"
@@ -2575,7 +2553,22 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
         );
         let row_after = workspace.row(&key).expect("the row remains");
         assert_eq!(row_after.config, row_before.config);
-        assert_eq!(row_after.egress_hosts, row_before.egress_hosts);
+        assert_eq!(
+            row_after.egress_hosts,
+            vec![unrelated_host.to_string()],
+            "the existing grant is never extended with the declared host"
+        );
+        let on_disk = row_on_disk(&workspace.config_on_disk(), &key).expect("the row is on disk");
+        assert_eq!(
+            on_disk
+                .get("egress_hosts")
+                .and_then(toml::Value::as_array)
+                .map(|hosts| hosts
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .collect::<Vec<_>>()),
+            Some(vec![unrelated_host])
+        );
         server.verify().await;
     }
 

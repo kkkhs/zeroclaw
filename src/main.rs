@@ -18096,51 +18096,17 @@ mod tests {
         );
     }
 
-    /// Runtime load verification for an *already installed* plugin.
-    ///
-    /// The install gate cannot cover a plugin installed before it existed,
-    /// installed through `--no-verify`, or one whose host was upgraded
-    /// underneath it. These are the two surfaces that can: `plugin info`
-    /// always, `plugin list --verify` on demand.
-    ///
-    /// The assertions run against the rendered lines rather than captured
-    /// stdout because those functions *are* the output. That is also what lets
-    /// the plain listing be checked for the absence of the flag's effect.
-    #[cfg(feature = "plugins-wasm-cranelift")]
-    mod plugin_load_check {
-        use super::*;
-        use std::path::{Path, PathBuf};
+    /// The in-tree tool component, for every test in this binary that needs a
+    /// real one: the plugin load-check tests below and the Quickstart plugin
+    /// step's tests.
+    #[cfg(any(
+        feature = "plugins-wasm-cranelift",
+        all(feature = "agent-runtime", feature = "plugins-wasm")
+    ))]
+    pub(crate) mod tool_component_fixture {
+        use std::path::PathBuf;
         use std::process::Command;
         use std::sync::OnceLock;
-        use zeroclaw::plugins::host::PluginHost;
-
-        /// The wasmtime-independent part of a compile failure's cause chain.
-        /// Asserting on this rather than on translated prose keeps the test
-        /// honest under any locale the process happens to detect.
-        const LOAD_FAILURE_CAUSE: &str = "failed to load WASM component";
-
-        fn verifier_limits() -> zeroclaw::plugins::component::PluginLimits {
-            zeroclaw_runtime::plugin_runtime::plugin_limits(
-                &crate::config::schema::Config::default(),
-            )
-        }
-
-        /// The fixture package's manifest, mirroring the one the plugins
-        /// crate's end-to-end test installs.
-        const FIXTURE_MANIFEST: &str = r#"name = "tool-fixture"
-version = "0.0.0"
-wasm_path = "tool-fixture.wasm"
-capabilities = ["tool"]
-permissions = ["config_read"]
-
-[config_schema]
-"$schema" = "https://json-schema.org/draft/2020-12/schema"
-type = "object"
-additionalProperties = false
-
-[config_schema.properties.label]
-type = "string"
-"#;
 
         /// This test binary sits at `<target>/<profile>/deps/<name>`, so its
         /// own path is what locates the target directory when
@@ -18153,10 +18119,10 @@ type = "string"
                 .to_path_buf()
         }
 
-        /// Build the in-tree tool component once per test binary. There is no
-        /// skip path: a fixture that cannot be built is a test failure, not a
-        /// silently green run.
-        fn tool_fixture() -> PathBuf {
+        /// The component, built once per test process. There is no skip path:
+        /// a fixture that cannot be built is a test failure, not a silently
+        /// green run.
+        pub(crate) fn wasm() -> PathBuf {
             static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
             FIXTURE
                 .get_or_init(|| {
@@ -18192,6 +18158,51 @@ type = "string"
                 })
                 .clone()
         }
+    }
+
+    /// Runtime load verification for an *already installed* plugin.
+    ///
+    /// The install gate cannot cover a plugin installed before it existed,
+    /// installed through `--no-verify`, or one whose host was upgraded
+    /// underneath it. These are the two surfaces that can: `plugin info`
+    /// always, `plugin list --verify` on demand.
+    ///
+    /// The assertions run against the rendered lines rather than captured
+    /// stdout because those functions *are* the output. That is also what lets
+    /// the plain listing be checked for the absence of the flag's effect.
+    #[cfg(feature = "plugins-wasm-cranelift")]
+    mod plugin_load_check {
+        use super::*;
+        use std::path::{Path, PathBuf};
+        use zeroclaw::plugins::host::PluginHost;
+
+        /// The wasmtime-independent part of a compile failure's cause chain.
+        /// Asserting on this rather than on translated prose keeps the test
+        /// honest under any locale the process happens to detect.
+        const LOAD_FAILURE_CAUSE: &str = "failed to load WASM component";
+
+        fn verifier_limits() -> zeroclaw::plugins::component::PluginLimits {
+            zeroclaw_runtime::plugin_runtime::plugin_limits(
+                &crate::config::schema::Config::default(),
+            )
+        }
+
+        /// The fixture package's manifest, mirroring the one the plugins
+        /// crate's end-to-end test installs.
+        const FIXTURE_MANIFEST: &str = r#"name = "tool-fixture"
+version = "0.0.0"
+wasm_path = "tool-fixture.wasm"
+capabilities = ["tool"]
+permissions = ["config_read"]
+
+[config_schema]
+"$schema" = "https://json-schema.org/draft/2020-12/schema"
+type = "object"
+additionalProperties = false
+
+[config_schema.properties.label]
+type = "string"
+"#;
 
         /// Seed a throwaway config directory and install the fixture into it
         /// through the real `PluginHost::install`, so the package under test is
@@ -18199,7 +18210,11 @@ type = "string"
         fn install_fixture(workspace: &Path) -> PluginHost {
             let source = workspace.join("source/tool-fixture");
             std::fs::create_dir_all(&source).unwrap();
-            std::fs::copy(tool_fixture(), source.join("tool-fixture.wasm")).unwrap();
+            std::fs::copy(
+                super::tool_component_fixture::wasm(),
+                source.join("tool-fixture.wasm"),
+            )
+            .unwrap();
             std::fs::write(source.join("manifest.toml"), FIXTURE_MANIFEST).unwrap();
 
             let mut host = PluginHost::new(workspace).expect("throwaway plugin host");
