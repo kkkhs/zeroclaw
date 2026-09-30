@@ -443,6 +443,11 @@ impl CreatePhase {
     /// After the agent step succeeded: the status of each installed package,
     /// from the same activation plan every registry build derives and the
     /// config row its instance reads its settings from, then the restart note.
+    ///
+    /// Quickstart writes the config file and never signals a running daemon,
+    /// which keeps the configuration it loaded until it restarts or reloads.
+    /// The note names the one CLI command that restarts it, the service
+    /// restart; no CLI command asks a daemon to reload.
     pub(crate) fn print_readiness(&self, config: &Config) {
         for line in self.readiness_lines(config) {
             println!("{line}");
@@ -476,7 +481,10 @@ impl CreatePhase {
                 &[("error", &terminal_safe_detail(&format!("{error:#}")))],
             ))),
         }
-        lines.push(qta("cli-quickstart-plugins-restart-note", &[]));
+        lines.push(qta(
+            "cli-quickstart-plugins-restart-note",
+            &[("command", &zeroclaw_command(config, "service restart"))],
+        ));
         lines
     }
 
@@ -2166,6 +2174,13 @@ hosts = ["api.example.com"]
                 &[("name", FIXTURE_NAME), ("key", &key)]
             )),
             "a configured, admitted instance is reported active: {readiness}"
+        );
+        // Quickstart never signals a running daemon: the closing note names
+        // the service restart, addressed to the configuration this run wrote.
+        let restart = zeroclaw_command(&workspace.config, "service restart");
+        assert!(
+            restart.contains("--config-dir") && readiness.contains(&restart),
+            "the restart note carries the service restart command: {readiness}"
         );
         server.verify().await;
     }

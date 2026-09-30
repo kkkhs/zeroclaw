@@ -168,8 +168,16 @@ it is not active, such as `plugins.enabled` or `plugins.auto_discover` being
 off or the `plugins.max_active_instances` limit being reached. A plugin you
 installed without its required settings is not usable until they are set, so
 its status names them, each with the `zeroclaw config set` command that asks
-for its value. A daemon that is already running picks up new tool plugins the
-next time it builds its tool registry; channel plugins need a daemon restart.
+for its value.
+
+Quickstart writes the config file and never signals a running daemon. A daemon
+that is already running keeps the configuration it loaded, so it uses the new
+plugins, their settings, and any change to plugin activation only after it
+restarts or reloads its configuration. The status ends with the
+`zeroclaw service restart` command, addressed to the same configuration
+directory, which restarts a daemon that runs as the installed service.
+`zeroclaw agent` and other one-shot commands pick the changes up the next time
+they start.
 
 Ctrl+C does not work the same everywhere in the plugin step. At a secret setting
 it works like Esc: at a required setting it cancels that plugin's settings, so

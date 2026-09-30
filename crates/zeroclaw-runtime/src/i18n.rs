@@ -1237,6 +1237,7 @@ mod tests {
             "printf '%s\\n' '[{{\"op\":\"add\",\"path\":\"/plugins/entries/{key}/egress_hosts\",\
              \"value\":[\"api.example.com\"]}}]' | zeroclaw --config-dir '/srv/zc' config patch -"
         );
+        let restart = "zeroclaw --config-dir '/srv/zc' service restart";
         /// One catalogue assertion: key, the args it is formatted with, and
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
@@ -1379,7 +1380,14 @@ mod tests {
             ("cli-quickstart-plugins-agent-not-created", &[], &[]),
             ("cli-quickstart-plugins-remove-heading", &[], &[]),
             ("cli-quickstart-plugins-fix-and-rerun", &[], &[]),
-            ("cli-quickstart-plugins-restart-note", &[], &[]),
+            // Quickstart never signals a running daemon. The note names the
+            // command that restarts the installed service and the one-shot
+            // command that reads the new configuration on its next start.
+            (
+                "cli-quickstart-plugins-restart-note",
+                &[("command", restart)],
+                &[restart, "`zeroclaw agent`"],
+            ),
         ];
 
         let english_source = include_str!("../locales/en/cli.ftl");
