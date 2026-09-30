@@ -453,6 +453,37 @@ Channel-only packages are silent on both surfaces until the alias-aware key
 path above lands, because no instance row can yet be derived to compare
 against.
 
+## Installing from Quickstart
+
+A build with the plugin host can also install tool plugins from the optional
+Plugins row of the CLI Quickstart;
+[Quickstart → Plugins](../getting-started/quickstart.md#plugins) walks through
+it. Quickstart runs the same download, admission, load check, and
+publish-and-seed transaction as `zeroclaw plugin install`, and the rules above
+still apply:
+
+- **Declaration versus grant.** Quickstart shows you the manifest's `[egress]`
+  declaration, which grants nothing by itself. When it installs a package, you
+  choose whether the new row grants the declared destinations; installing
+  without network access leaves `egress_hosts` empty and prints the command
+  that grants them later. For a package that was already installed, it only
+  seeds a missing row, from the declaration, as `zeroclaw plugin install` does,
+  and prints what that row grants.
+- **An existing row is never extended.** When the instance's
+  `[[plugins.entries]]` row already exists, Quickstart leaves its
+  `egress_hosts`, `egress_allow_private`, and settings exactly as they are. It
+  never downloads, upgrades, or reconfigures a package that is already
+  installed, and only creates that package's row if it is missing.
+- **Activation needs your consent.** Quickstart never turns on
+  `plugins.enabled` or `plugins.auto_discover` without asking. Before it asks,
+  it lists every tool, skill, and channel plugin those settings would
+  activate, including plugins installed earlier, and the question defaults to
+  no when that list goes beyond the plugins you just picked.
+
+Quickstart is stricter than `plugin install` in one respect: it refuses a
+registry entry that carries no `sha256` digest for its archive instead of
+installing an archive it cannot verify.
+
 ## Where the trust boundary actually is
 
 The sandbox bounds what a loaded plugin can do; the signature policy bounds

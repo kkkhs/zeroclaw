@@ -1213,6 +1213,220 @@ mod tests {
     }
 
     #[test]
+    fn quickstart_plugin_step_strings_format_in_every_locale() {
+        // The Quickstart Plugins step is where an operator decides what a
+        // publisher's package may reach and whether plugins activate at all.
+        // Its lines carry the literal commands that grant a withheld
+        // destination or set a property later, and the config paths that
+        // explain why an installed tool is inactive. A catalogue that drops a
+        // key ships the raw `{key}` sentinel; one that drops a placeholder or
+        // translates a path ships an instruction the operator cannot follow.
+        // Assert both, in every shipped catalogue.
+        let key = "zpi1_WyJ3ZWF0aGVyLXRvb2wiLCJ0b29sIiwid2VhdGhlci10b29sIl0";
+        let grant = format!(
+            "zeroclaw --config-dir '/srv/zc' config set plugins.entries.{key}.egress_hosts \
+             'api.example.com'"
+        );
+        let grant_later = format!(
+            "zeroclaw --config-dir '/srv/zc' config set plugins.entries.{key}.egress_hosts '<host>'"
+        );
+        let set_later = format!(
+            "zeroclaw --config-dir '/srv/zc' config set plugins.entries.{key}.config.<key> <value>"
+        );
+        /// One catalogue assertion: key, the args it is formatted with, and
+        /// the substrings the rendered value must contain.
+        type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
+
+        let cases: [QuickstartPluginCase<'_>; 15] = [
+            (
+                "cli-quickstart-plugins-choice-installed-other",
+                &[
+                    ("name", "weather-tool"),
+                    ("version", "0.1.0"),
+                    ("registry_version", "0.2.0"),
+                    ("description", "Forecasts"),
+                ],
+                &["weather-tool", "0.1.0", "0.2.0", "Forecasts"],
+            ),
+            // Onboarding refuses an archive it cannot verify, and says which
+            // digest the registry entry lacks.
+            (
+                "cli-quickstart-plugins-no-integrity-hash",
+                &[("name", "weather-tool")],
+                &["weather-tool", "sha256"],
+            ),
+            // A withheld or missing grant hands back the exact command,
+            // because the instance key it addresses is opaque.
+            (
+                "cli-quickstart-plugins-egress-withheld",
+                &[
+                    ("name", "weather-tool"),
+                    ("count", "1"),
+                    ("command", grant.as_str()),
+                ],
+                &["weather-tool", grant.as_str()],
+            ),
+            (
+                "cli-quickstart-plugins-no-declared-hosts",
+                &[("name", "weather-tool"), ("command", grant_later.as_str())],
+                &["weather-tool", grant_later.as_str()],
+            ),
+            // Settings Quickstart cannot prompt for, or could not save, point
+            // at the command that sets them, verbatim.
+            (
+                "cli-quickstart-plugins-config-unsupported",
+                &[("name", "weather-tool"), ("keys", "proxy.url")],
+                &["weather-tool", "proxy.url", "`zeroclaw config set`"],
+            ),
+            (
+                "cli-quickstart-plugins-config-defaults-prompt",
+                &[("name", "weather-tool")],
+                &["weather-tool", "`zeroclaw config set`"],
+            ),
+            (
+                "cli-quickstart-plugins-config-save-failed",
+                &[
+                    ("name", "weather-tool"),
+                    ("keys", "api_key, units"),
+                    ("error", "config file is read-only"),
+                    ("command", set_later.as_str()),
+                ],
+                &[
+                    "weather-tool",
+                    "api_key, units",
+                    "config file is read-only",
+                    set_later.as_str(),
+                ],
+            ),
+            // The activation consent names the flags it turns on, and a
+            // channel it would wake by its config reference.
+            (
+                "cli-quickstart-plugins-activation-heading",
+                &[("settings", "plugins.enabled, plugins.auto_discover")],
+                &["plugins.enabled, plugins.auto_discover"],
+            ),
+            (
+                "cli-quickstart-plugins-activation-channel",
+                &[("alias", "ops"), ("name", "chat-bridge")],
+                &["plugin.ops", "chat-bridge"],
+            ),
+            // Each readiness verdict names the instance key or the config
+            // path that holds the instance back.
+            (
+                "cli-quickstart-plugins-ready",
+                &[("name", "weather-tool"), ("key", key)],
+                &["weather-tool", key],
+            ),
+            (
+                "cli-quickstart-plugins-ready-plugins-disabled",
+                &[("name", "weather-tool")],
+                &["weather-tool", "plugins.enabled"],
+            ),
+            (
+                "cli-quickstart-plugins-ready-auto-discover-disabled",
+                &[("name", "weather-tool")],
+                &["weather-tool", "plugins.auto_discover"],
+            ),
+            (
+                "cli-quickstart-plugins-ready-ceiling",
+                &[("name", "weather-tool"), ("max", "16")],
+                &["weather-tool", "plugins.max_active_instances", "16"],
+            ),
+            (
+                "cli-quickstart-plugins-apply-failed-state-activated",
+                &[("names", "weather-tool, notes-tool")],
+                &["weather-tool, notes-tool"],
+            ),
+            ("cli-quickstart-plugins-restart-note", &[], &[]),
+        ];
+
+        let english_source = include_str!("../locales/en/cli.ftl");
+        for (key_name, args, must_contain) in &cases {
+            let english = format_ftl_message(english_source, "en", key_name, args)
+                .unwrap_or_else(|| panic!("{key_name} should format in en"));
+            for (source, locale) in committed_locale_sources() {
+                let value = format_ftl_message(source, locale, key_name, args)
+                    .unwrap_or_else(|| panic!("{key_name} should format in {locale}"));
+                assert!(
+                    !value.trim().is_empty(),
+                    "{key_name} must not be empty in {locale}"
+                );
+                for needle in *must_contain {
+                    assert!(
+                        value.contains(needle),
+                        "{key_name} in {locale} must inline {needle:?}; got: {value:?}"
+                    );
+                }
+                if locale != "en" {
+                    assert_ne!(
+                        value, english,
+                        "{key_name} in {locale} is the English string verbatim, so that \
+                         catalogue was never translated"
+                    );
+                }
+            }
+        }
+
+        // Every key of the step, not only the cases above, is defined in every
+        // catalogue and interpolates exactly the arguments English does. Each
+        // argument is a distinct sentinel, so a catalogue that drops or
+        // renames a placeholder fails here by name.
+        const SENTINELS: [(&str, &str); 17] = [
+            ("alias", "@@alias@@"),
+            ("author", "@@author@@"),
+            ("command", "@@command@@"),
+            ("count", "@@count@@"),
+            ("description", "@@description@@"),
+            ("error", "@@error@@"),
+            ("glyph", "@@glyph@@"),
+            ("key", "@@key@@"),
+            ("keys", "@@keys@@"),
+            ("list", "@@list@@"),
+            ("max", "@@max@@"),
+            ("name", "@@name@@"),
+            ("names", "@@names@@"),
+            ("registry_version", "@@registry_version@@"),
+            ("settings", "@@settings@@"),
+            ("summary", "@@summary@@"),
+            ("version", "@@version@@"),
+        ];
+        fn interpolated(value: &str) -> Vec<&'static str> {
+            SENTINELS
+                .iter()
+                .map(|(_, sentinel)| *sentinel)
+                .filter(|sentinel| value.contains(sentinel))
+                .collect()
+        }
+
+        let family: Vec<&str> = english_source
+            .lines()
+            .filter_map(|line| line.split_once(" = ").map(|(id, _)| id))
+            .filter(|id| {
+                *id == "cli-quickstart-row-plugins" || id.starts_with("cli-quickstart-plugins-")
+            })
+            .collect();
+        for (key_name, _, _) in &cases {
+            assert!(
+                family.contains(key_name),
+                "{key_name} is not a key of the Quickstart plugin step"
+            );
+        }
+        for key_name in &family {
+            let english = format_ftl_message(english_source, "en", key_name, &SENTINELS)
+                .unwrap_or_else(|| panic!("{key_name} should format in en"));
+            for (source, locale) in committed_locale_sources() {
+                let value = format_ftl_message(source, locale, key_name, &SENTINELS)
+                    .unwrap_or_else(|| panic!("{key_name} should format in {locale}"));
+                assert_eq!(
+                    interpolated(&value),
+                    interpolated(&english),
+                    "{key_name} in {locale} must interpolate the arguments en does; got: {value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn channel_approval_group_visibility_warning_is_translated_in_every_locale() {
         // This warning is what tells an operator why a stranger's reply to a
         // group approval token will bounce, so a catalogue that omits it ships
