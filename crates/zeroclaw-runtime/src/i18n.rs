@@ -1233,11 +1233,15 @@ mod tests {
         let set_later = format!(
             "zeroclaw --config-dir '/srv/zc' config set plugins.entries.{key}.config.<key> <value>"
         );
+        let create_later = format!(
+            "printf '%s\\n' '[{{\"op\":\"add\",\"path\":\"/plugins/entries/{key}/egress_hosts\",\
+             \"value\":[\"api.example.com\"]}}]' | zeroclaw --config-dir '/srv/zc' config patch -"
+        );
         /// One catalogue assertion: key, the args it is formatted with, and
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 18] = [
+        let cases: [QuickstartPluginCase<'_>; 20] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1270,6 +1274,19 @@ mod tests {
                 "cli-quickstart-plugins-no-declared-hosts",
                 &[("name", "weather-tool"), ("command", grant_later.as_str())],
                 &["weather-tool", grant_later.as_str()],
+            ),
+            // An installed package missing its row gets the fresh-install
+            // decision; skipping it leaves no row, so only the command that
+            // creates one can grant it later.
+            (
+                "cli-quickstart-plugins-missing-row",
+                &[("name", "weather-tool")],
+                &["weather-tool"],
+            ),
+            (
+                "cli-quickstart-plugins-row-skipped",
+                &[("name", "weather-tool"), ("command", create_later.as_str())],
+                &["weather-tool", create_later.as_str()],
             ),
             // Settings Quickstart cannot prompt for, or could not save, point
             // at the command that sets them, verbatim.

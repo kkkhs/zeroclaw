@@ -30,7 +30,8 @@ use zeroclaw_runtime::quickstart::{FieldDescriptor, QuickstartError, Surface};
 use crate::config::schema::Config;
 use crate::plugin_registry::{RegistryClient, RegistryTimeouts};
 use crate::plugins::egress_ceremony::{
-    EgressDecision, ShellDialect, canonical_hosts, egress_set_command, zeroclaw_invocation_for,
+    EgressDecision, ShellDialect, canonical_hosts, egress_create_command, egress_set_command,
+    zeroclaw_invocation_for,
 };
 use crate::qta;
 use model::{
@@ -804,7 +805,7 @@ async fn install_one<P: QuickstartPrompter>(
     // The plugins directory decides, not the state the row saw: a package
     // installed since then is left alone.
     if host.manifest(&name).is_some() {
-        return Ok(Box::pin(keep_installed(config, host, &name, prompter)).await);
+        return Box::pin(keep_installed(config, host, &name, prompter)).await;
     }
     let Some(entry) = choice.registry_entry.as_ref() else {
         prompter.say(&indented(&qta(
@@ -1004,42 +1005,89 @@ async fn install_one<P: QuickstartPrompter>(
 /// A package that was installed before this run: no download, no publish, no
 /// upgrade. The only write is the idempotent seeding of a row it lacks, which
 /// creates rows only when absent and never touches an existing one.
+///
+/// A row this run creates is a new grant. For a package that declares
+/// destinations it could reach, the operator gets the package summary and the
+/// same egress decision a fresh install gets, and a skip leaves the row
+/// absent. Nothing is asked when the row already exists.
 async fn keep_installed<P: QuickstartPrompter>(
     config: &mut Config,
     host: &PluginHost,
     name: &str,
     prompter: &mut P,
-) -> PackageOutcome {
+) -> PromptResult<PackageOutcome> {
     let display_name = terminal_safe(name);
     prompter.say(&indented(&qta(
         "cli-quickstart-plugins-already-installed",
         &[("name", &display_name)],
     )));
-    let seeded = Box::pin(async {
-        let entries = crate::installed_plugin_config_entries(host, name)?;
-        if entries.iter().all(|(_, key)| has_row(config, key)) {
-            return Ok(false);
+    let kept = |seeded_row| PackageOutcome::AlreadyInstalled {
+        name: name.to_string(),
+        seeded_row,
+    };
+    let entries = match crate::installed_plugin_config_entries(host, name) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return Ok(failure(
+                prompter,
+                name,
+                FailureStage::Seed,
+                &format!("{error:#}"),
+            ));
         }
-        let mut staged = config.clone();
-        Box::pin(crate::seed_plugin_config_entries(
-            &mut staged,
-            name,
-            &entries,
-            &crate::declared_egress_hosts(host, name),
-            EgressDecision::Declared,
-        ))
-        .await?;
-        *config = staged;
-        anyhow::Ok(true)
-    })
+    };
+    let Some(missing_key) = entries
+        .iter()
+        .map(|(_, key)| key)
+        .find(|key| !has_row(config, key))
+        .cloned()
+    else {
+        return Ok(kept(false));
+    };
+    let declared = crate::declared_egress_hosts(host, name);
+    let decision = match host.manifest(name) {
+        Some(manifest) if asks_for_egress(manifest) => {
+            prompter.say(&indented(&qta(
+                "cli-quickstart-plugins-missing-row",
+                &[("name", &display_name)],
+            )));
+            print_package_summary(manifest, prompter);
+            match egress_decision(manifest, prompter)? {
+                Some(decision) => decision,
+                None => {
+                    // `config set` resolves only rows that exist, so the way
+                    // back is the command that creates this one.
+                    let command = egress_create_command(
+                        crate::egress_command_config_dir(config),
+                        &missing_key,
+                        &canonical_hosts(&declared),
+                    );
+                    prompter.say(&indented(&qta(
+                        "cli-quickstart-plugins-row-skipped",
+                        &[("name", &display_name), ("command", &command)],
+                    )));
+                    return Ok(kept(false));
+                }
+            }
+        }
+        _ => EgressDecision::Declared,
+    };
+    let mut staged = config.clone();
+    let seeded = Box::pin(crate::seed_plugin_config_entries(
+        &mut staged,
+        name,
+        &entries,
+        &declared,
+        decision,
+    ))
     .await;
-    match seeded {
-        Ok(seeded_row) => PackageOutcome::AlreadyInstalled {
-            name: name.to_string(),
-            seeded_row,
-        },
+    Ok(match seeded {
+        Ok(()) => {
+            *config = staged;
+            kept(true)
+        }
         Err(error) => failure(prompter, name, FailureStage::Seed, &format!("{error:#}")),
-    }
+    })
 }
 
 /// Report a package that failed at `stage` and record it. Nothing durable
@@ -1133,17 +1181,23 @@ fn requests_network(manifest: &PluginManifest) -> bool {
     })
 }
 
-/// Ask whether the destinations the manifest declares are granted. Only a
-/// manifest with `http_client` and a declaration gets the question: without
+/// Whether a row created for `manifest` grants anything the operator must
+/// decide on: only a manifest with `http_client` and a declaration. Without
 /// the transport nothing is seeded anyway, and without a declaration there is
-/// nothing to grant. `None` skips the package.
+/// nothing to grant.
+fn asks_for_egress(manifest: &PluginManifest) -> bool {
+    manifest.permissions.contains(&PluginPermission::HttpClient)
+        && !canonical_hosts(&manifest.egress.hosts).is_empty()
+}
+
+/// Ask whether the destinations the manifest declares are granted, when
+/// [`asks_for_egress`] says there is anything to decide. `None` skips the
+/// package.
 fn egress_decision<P: QuickstartPrompter>(
     manifest: &PluginManifest,
     prompter: &mut P,
 ) -> PromptResult<Option<EgressDecision>> {
-    if !manifest.permissions.contains(&PluginPermission::HttpClient)
-        || canonical_hosts(&manifest.egress.hosts).is_empty()
-    {
+    if !asks_for_egress(manifest) {
         return Ok(Some(EgressDecision::Declared));
     }
     let options = [
@@ -2249,6 +2303,92 @@ hosts = ["api.example.com"]
             "one row, never two"
         );
         server.verify().await;
+    }
+
+    /// Publish the fixture into the workspace's plugins directory with no
+    /// config row, the state a Ctrl+C between the publish and the seeding of
+    /// an earlier install leaves behind.
+    fn install_without_a_row(workspace: &Workspace) {
+        let source = workspace.dir.path().join("source").join(FIXTURE_NAME);
+        std::fs::create_dir_all(&source).expect("package source directory");
+        std::fs::copy(tool_fixture_wasm(), source.join("tool-fixture.wasm"))
+            .expect("copy the component");
+        std::fs::write(source.join("manifest.toml"), FIXTURE_MANIFEST).expect("write the manifest");
+        let mut host =
+            crate::plugin_host_with_configured_security(&workspace.config).expect("plugin host");
+        host.install(source.to_str().expect("UTF-8 temporary path"))
+            .expect("install the fixture");
+    }
+
+    #[tokio::test]
+    async fn an_installed_package_missing_its_row_gets_the_fresh_install_decision() {
+        for (decision, seeded_row, granted) in [
+            (GRANT, true, Some(vec![DECLARED_HOST.to_string()])),
+            (WITHHOLD, true, Some(Vec::new())),
+            (SKIP, false, None),
+        ] {
+            let server = MockServer::start().await;
+            serve_valid_archive(&server, 0).await;
+            let mut workspace = Workspace::new();
+            install_without_a_row(&workspace);
+            let before = workspace.config_bytes();
+            let selection = selection(fixture_entry(&server, Some(archive_digest())));
+            // The egress decision, then activation declined.
+            let mut prompter = ScriptedPrompter::new([
+                Answer::Select(Some(decision)),
+                Answer::Confirm(Some(false)),
+            ]);
+
+            let phase = run(&mut workspace, &selection, &mut prompter)
+                .await
+                .expect("the phase completes");
+
+            prompter.assert_done();
+            assert_eq!(
+                phase.outcomes,
+                vec![PackageOutcome::AlreadyInstalled {
+                    name: FIXTURE_NAME.to_string(),
+                    seeded_row,
+                }],
+                "decision {decision}"
+            );
+            assert_eq!(
+                prompter.choice_lists[0].len(),
+                3,
+                "the fresh-install question is asked"
+            );
+            let output = prompter.output();
+            assert!(
+                output.contains(&qta(
+                    "cli-quickstart-plugins-about-destinations",
+                    &[("list", DECLARED_HOST)]
+                )),
+                "the package summary comes first: {output}"
+            );
+            let key = fixture_instance_key();
+            assert_eq!(
+                workspace.row(&key).map(|row| row.egress_hosts.clone()),
+                granted,
+                "decision {decision}"
+            );
+            if seeded_row {
+                assert!(
+                    row_on_disk(&workspace.config_on_disk(), &key).is_some(),
+                    "decision {decision}: the row is persisted"
+                );
+            } else {
+                assert_eq!(
+                    workspace.config_bytes(),
+                    before,
+                    "a skip leaves the row absent"
+                );
+                assert!(
+                    output.contains("config patch -"),
+                    "a skip names the command that creates the row later: {output}"
+                );
+            }
+            server.verify().await;
+        }
     }
 
     #[tokio::test]

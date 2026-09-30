@@ -130,13 +130,17 @@ Setting values never appear in Quickstart's output or logs; only their names
 do.
 
 A plugin that is already installed is not downloaded, upgraded, or prompted for
-again: Quickstart only creates its config entry when that entry is missing,
-seeded from the manifest declaration as `zeroclaw plugin install` seeds it, and
-prints what the entry grants. An existing entry is never changed, whether it
-belongs to an installed plugin or was left behind by an earlier install, so its
-egress grant and settings stay exactly as they are. Running Quickstart again
-with the same picks therefore downloads nothing and leaves those entries
-untouched.
+settings again. Quickstart only creates its config entry when that entry is
+missing. A new entry is a new grant, so for a plugin that requests
+`http_client` and declares destinations you first see what the plugin is and
+make the same choice as for a fresh install: grant the declared destinations,
+create the entry without network access, or skip, which leaves the entry absent
+and prints the command that creates it later. Any other missing entry is seeded
+as `zeroclaw plugin install` seeds it. An existing entry is never changed,
+whether it belongs to an installed plugin or was left behind by an earlier
+install, so its egress grant and settings stay exactly as they are. Running
+Quickstart again with the same picks therefore downloads nothing and leaves
+those entries untouched.
 
 After the last plugin, if at least one picked plugin is installed and
 `plugins.enabled` or `plugins.auto_discover` is off, Quickstart asks once

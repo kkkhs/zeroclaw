@@ -463,12 +463,12 @@ publish-and-seed transaction as `zeroclaw plugin install`, and the rules above
 still apply:
 
 - **Declaration versus grant.** Quickstart shows you the manifest's `[egress]`
-  declaration, which grants nothing by itself. When it installs a package, you
-  choose whether the new row grants the declared destinations; installing
-  without network access leaves `egress_hosts` empty and prints the command
-  that grants them later. For a package that was already installed, it only
-  seeds a missing row, from the declaration, as `zeroclaw plugin install` does,
-  and prints what that row grants.
+  declaration, which grants nothing by itself. Whenever it creates a row for a
+  package that declares destinations, you choose whether the new row grants
+  them, whether the package is new or was already installed without its row;
+  installing without network access leaves `egress_hosts` empty and prints the
+  command that grants them later. Skipping an already installed package leaves
+  its row absent and prints the command that creates it.
 - **An existing row is never extended.** When the instance's
   `[[plugins.entries]]` row already exists, Quickstart leaves its
   `egress_hosts`, `egress_allow_private`, and settings exactly as they are. It
