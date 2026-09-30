@@ -2985,10 +2985,10 @@ async fn run_quickstart_cli(
 
     // Plugins picked in the Plugins row are installed, configured and offered
     // for activation now, before the agent step. The phase dry-runs the agent
-    // step first, so a submission it would refuse stops here with nothing on
-    // disk changed. Each plugin then goes through the canonical
-    // publish-and-seed transaction, so an interruption never leaves a package
-    // half published.
+    // step first, so a submission it would refuse stops here before any config
+    // is changed or any plugin installed. Each plugin then goes through the
+    // canonical publish-and-seed transaction, so an interruption never leaves
+    // a package half published.
     #[cfg(feature = "plugins-wasm")]
     let plugin_phase = match Box::pin(crate::quickstart_plugins::run_create_phase(
         &mut cfg,
@@ -3050,10 +3050,10 @@ async fn run_quickstart_cli(
 /// Print why the agent step refused a Quickstart submission and return the
 /// error Quickstart ends with.
 ///
-/// The report opens with the lines that say nothing on disk was changed,
-/// which is true of a refused agent step on its own. `headline` replaces them
-/// for a run whose plugin step already installed, configured or activated
-/// plugins.
+/// The report opens with the agent step's usual lines, which say nothing on
+/// disk was changed. `headline` replaces them for a run whose plugin step
+/// already installed, configured or activated plugins, where they would be
+/// false.
 #[cfg(feature = "agent-runtime")]
 fn report_agent_not_created(
     errs: &[zeroclaw_runtime::quickstart::QuickstartError],

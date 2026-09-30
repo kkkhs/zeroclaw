@@ -2,11 +2,14 @@
 //! registry, installed and configured when the agent is created, then
 //! activated with the operator's consent.
 //!
-//! Picking downloads and writes nothing. On Create the agent step is dry-run
-//! first, so a submission it would refuse stops Create before any plugin is
-//! touched. Then each selected package goes through the pipeline
-//! `zeroclaw plugin install` uses (registry download, admission, the load
-//! check, then the one publish-and-seed transaction), with three differences
+//! Picking downloads no package and writes no config. On Create the agent step
+//! is dry-run first, so a submission it would refuse stops Create before any
+//! config is changed or any plugin installed. The dry run can still create
+//! the agent's workspace directory when the submission carries personality
+//! files, as the agent step's own validation does. Then each selected package
+//! goes through the pipeline `zeroclaw plugin install` uses (registry
+//! download, admission, the load check, then the one publish-and-seed
+//! transaction), with three differences
 //! an unattended install does not have: the registry entry must carry an
 //! archive digest, the operator decides whether the destinations the manifest
 //! declares are granted, and the instance's own settings are prompted for and
@@ -395,7 +398,7 @@ pub(crate) struct CreatePhase {
 #[derive(Debug)]
 pub(crate) enum PhaseHalt {
     /// The agent step would refuse the submission. It is dry-run before any
-    /// plugin is touched, so nothing on disk changed.
+    /// plugin is touched, so no config was changed and nothing installed.
     AgentRejected(Vec<QuickstartError>),
     /// Ctrl+C at a prompt.
     Interrupted { outcomes: Vec<PackageOutcome> },
@@ -418,7 +421,8 @@ impl PhaseHalt {
     /// `None` for Ctrl+C, which exits with status 130 like the checklist.
     pub(crate) fn report(self) -> Option<anyhow::Error> {
         match self {
-            // Nothing was touched, so the agent step's own report is true.
+            // The plugin step changed no config and installed nothing, so the
+            // agent step's own report applies, as without a plugin step.
             Self::AgentRejected(errors) => Some(crate::report_agent_not_created(&errors, None)),
             Self::Interrupted { outcomes } => {
                 print_progress(&outcomes);
@@ -788,8 +792,9 @@ pub(crate) async fn run_create_phase(
 /// then the plugins.
 ///
 /// The agent step runs after the plugins, which change the machine. A
-/// submission it would refuse is therefore refused here, while its report
-/// that nothing on disk was changed is still true.
+/// submission it would refuse is therefore refused here, while the plugin
+/// step has changed no config and installed nothing, so the agent step's
+/// usual report applies.
 async fn create_phase_with<P: QuickstartPrompter>(
     config: &mut Config,
     selection: &[PluginChoice],
