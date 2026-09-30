@@ -1236,6 +1236,7 @@ mod tests {
         let install_anyway =
             "zeroclaw --config-dir '/srv/zc' plugin install weather-tool --no-verify";
         let remove = "zeroclaw --config-dir '/srv/zc' plugin remove weather-tool";
+        let info = "zeroclaw --config-dir '/srv/zc' plugin info weather-tool";
         // A printed command that creates a missing row grants nothing: the
         // declared destinations are granted by a separate command.
         let create_later = format!(
@@ -1247,7 +1248,7 @@ mod tests {
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 33] = [
+        let cases: [QuickstartPluginCase<'_>; 34] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1423,6 +1424,13 @@ mod tests {
                 "cli-quickstart-plugins-ready-ceiling",
                 &[("name", "weather-tool"), ("max", "16")],
                 &["weather-tool", "plugins.max_active_instances", "16"],
+            ),
+            // A package installed before the run that does not load is never
+            // reported active; the line gives the command that shows why.
+            (
+                "cli-quickstart-plugins-ready-does-not-load",
+                &[("name", "weather-tool"), ("command", info)],
+                &["weather-tool", info],
             ),
             // An instance whose row the runtime's resolver rejects is never
             // reported active: the resolver's reason is shown, and the

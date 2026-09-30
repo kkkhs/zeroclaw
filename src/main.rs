@@ -3020,7 +3020,7 @@ async fn run_quickstart_cli(
                 Box::pin(run_inline_provider_auth(auth, &mut cfg)).await;
             }
             #[cfg(feature = "plugins-wasm")]
-            plugin_phase.print_readiness(&cfg);
+            Box::pin(plugin_phase.print_readiness(&cfg)).await;
             println!();
             println!("{}", t("cli-next-steps", "Next steps:"));
             println!(

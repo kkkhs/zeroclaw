@@ -740,6 +740,7 @@ cli-quickstart-plugins-ready-plugins-disabled = {$name}: plugins.enabled がオ�
 cli-quickstart-plugins-ready-auto-discover-disabled = {$name}: plugins.auto_discover がオフのため無効です。
 cli-quickstart-plugins-ready-not-installed = {$name}: インストールされていません。
 cli-quickstart-plugins-ready-not-a-tool = {$name}: インストール済みですが、ツールを提供していません。
+cli-quickstart-plugins-ready-does-not-load = {$name}: インストール済みですが、このホストで読み込めないため、ZeroClaw は起動時にスキップします。原因は次のコマンドで確認できます: {$command}
 cli-quickstart-plugins-ready-ceiling = {$name}: plugins.max_active_instances の上限 ({$max}) に達しているため無効です。
 cli-quickstart-plugins-ready-unknown = {$name}: 状態を取得できません: {$error}
 cli-quickstart-plugins-ready-rejected = {$name}: インストール済みですが、設定エントリがプラグインの設定スキーマを満たしていないため使用できません: {$error}

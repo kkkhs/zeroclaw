@@ -808,6 +808,16 @@ impl PackageOutcome {
         )
     }
 
+    /// Whether the package was installed before this run, which therefore
+    /// never ran the install-time load check on it.
+    #[must_use]
+    pub(crate) fn installed_before_run(&self) -> bool {
+        matches!(
+            self,
+            Self::AlreadyInstalled { .. } | Self::AlreadyInstalledSkipped { .. }
+        )
+    }
+
     /// Whether the operator went ahead with the package: this run installed
     /// it, or kept it as installed before. Activating exactly these packages
     /// is the expected next step; a skipped one is not among them.
@@ -1411,6 +1421,15 @@ mod tests {
         assert!(installed.published_by_run());
         for other in [&seeded, &untouched, &failed, &skipped_row] {
             assert!(!other.published_by_run(), "{other:?}");
+        }
+
+        // Only a package installed before this run missed this run's load
+        // check, whatever happened to its row.
+        for before in [&seeded, &untouched, &skipped_row] {
+            assert!(before.installed_before_run(), "{before:?}");
+        }
+        for other in [&installed, &failed, &stranded] {
+            assert!(!other.installed_before_run(), "{other:?}");
         }
     }
 

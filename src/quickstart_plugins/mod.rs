@@ -495,18 +495,17 @@ impl CreatePhase {
     /// which keeps the configuration it loaded until it restarts or reloads.
     /// The note names the one CLI command that restarts it, the service
     /// restart; no CLI command asks a daemon to reload.
-    pub(crate) fn print_readiness(&self, config: &Config) {
-        for line in self.readiness_lines(config) {
+    pub(crate) async fn print_readiness(&self, config: &Config) {
+        for line in self.readiness_lines(config).await {
             println!("{line}");
         }
     }
 
-    fn readiness_lines(&self, config: &Config) -> Vec<String> {
-        let installed: Vec<&str> = self
+    async fn readiness_lines(&self, config: &Config) -> Vec<String> {
+        let installed: Vec<&PackageOutcome> = self
             .outcomes
             .iter()
             .filter(|outcome| outcome.is_installed())
-            .map(PackageOutcome::name)
             .collect();
         if installed.is_empty() {
             return Vec::new();
@@ -519,8 +518,16 @@ impl CreatePhase {
         // the config as they now are.
         match crate::plugin_host_with_configured_security(config) {
             Ok(host) => {
-                for name in installed {
-                    lines.extend(package_readiness(config, &host, name));
+                for outcome in installed {
+                    let name = outcome.name();
+                    // A package this run installed passed the load check
+                    // moments ago; one installed before it may never have.
+                    let load_failure = if outcome.installed_before_run() {
+                        Box::pin(load_failure_line(config, &host, name)).await
+                    } else {
+                        None
+                    };
+                    lines.extend(package_readiness(config, &host, name, load_failure));
                 }
             }
             Err(error) => lines.push(indented(&qta(
@@ -580,10 +587,42 @@ impl CreatePhase {
     }
 }
 
+/// The line that stands in for any claim that `name`, a package installed
+/// before this run, is active, when the load check `zeroclaw plugin info`
+/// runs finds that its component does not load against this host; `None`
+/// when it loads or ships no component.
+///
+/// Such a package may have been installed with `--no-verify` or may predate
+/// this host, and the daemon skips it at startup whatever its config says.
+/// The line gives the `plugin info` command that prints the diagnostic. When
+/// the check itself cannot run, the status is reported unavailable instead.
+async fn load_failure_line(config: &Config, host: &PluginHost, name: &str) -> Option<String> {
+    let info = host.get_plugin(name)?;
+    let limits = zeroclaw_runtime::plugin_runtime::plugin_limits(config);
+    match crate::installed_plugin_load_status(host, &info, limits).await {
+        Ok(status) if !status.is_load_failure() => None,
+        // An installed package name is lowercase letters, digits, `.`, `-`
+        // and `_`, which every supported shell passes as written.
+        Ok(_) => Some(qta(
+            "cli-quickstart-plugins-ready-does-not-load",
+            &[
+                ("name", &terminal_safe(name)),
+                (
+                    "command",
+                    &zeroclaw_command(config, &format!("plugin info {}", info.name)),
+                ),
+            ],
+        )),
+        Err(error) => Some(readiness_line(name, &Err(error))),
+    }
+}
+
 /// One installed package's readiness lines, read from `host` and `config`.
 ///
-/// A verdict that holds the instance back is reported first. Whatever the
-/// verdict, the instance is reported active only when the runtime's own
+/// `load_failure` is the [`load_failure_line`] of a package whose component
+/// does not load. It comes first, and such a package is never reported
+/// active. A verdict that holds the instance back is reported next. Whatever
+/// the verdict, the instance is reported active only when the runtime's own
 /// resolver accepts the row it reads, under the scope the activation plan
 /// grants it: a row the resolver rejects fails every call. The resolver's
 /// reason is then shown once, followed by the required settings the row
@@ -595,11 +634,22 @@ impl CreatePhase {
 /// gives the command that creates the row with no grant, and a manifest that
 /// declares destinations adds the separate command that grants them. When the
 /// row cannot be read, the status is reported unavailable rather than active.
-fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<String> {
+fn package_readiness(
+    config: &Config,
+    host: &PluginHost,
+    name: &str,
+    load_failure: Option<String>,
+) -> Vec<String> {
     let verdict = zeroclaw_runtime::plugin_runtime::tool_instance_admission(config, host, name)
         .map_err(anyhow::Error::from);
     let admitted = matches!(verdict, Ok(ToolInstanceAdmission::Admitted { .. }));
-    let mut lines = Vec::new();
+    // The daemon skips a package that does not load, whatever its verdict
+    // and its row say.
+    let loads = load_failure.is_none();
+    let mut lines: Vec<String> = load_failure
+        .map(|line| indented(&line))
+        .into_iter()
+        .collect();
     if !admitted {
         lines.push(indented(&readiness_line(name, &verdict)));
     }
@@ -669,11 +719,13 @@ fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<Stri
         }
         // The active line names the instance's config entry, which a tool
         // that owns no state never gets.
-        Ok(InstanceSettings::AcceptedWithoutRow) if admitted => lines.push(indented(&qta(
-            "cli-quickstart-plugins-ready-no-entry-needed",
-            &[("name", &display_name)],
-        ))),
-        Ok(InstanceSettings::Accepted) if admitted => {
+        Ok(InstanceSettings::AcceptedWithoutRow) if admitted && loads => {
+            lines.push(indented(&qta(
+                "cli-quickstart-plugins-ready-no-entry-needed",
+                &[("name", &display_name)],
+            )));
+        }
+        Ok(InstanceSettings::Accepted) if admitted && loads => {
             lines.push(indented(&readiness_line(name, &verdict)));
         }
         Ok(_) => {}
@@ -2565,7 +2617,7 @@ hosts = ["api.example.com"]
                 instance_key: key.clone()
             }
         );
-        let readiness = phase.readiness_lines(&workspace.config).join("\n");
+        let readiness = phase.readiness_lines(&workspace.config).await.join("\n");
         assert!(
             readiness.contains(&qta(
                 "cli-quickstart-plugins-ready",
@@ -2979,7 +3031,7 @@ hosts = ["api.example.com"]
                 // The status reads the absent row: it gives the same two
                 // commands, and no setting command, since `config set` only
                 // resolves rows that exist.
-                let readiness = phase.readiness_lines(&workspace.config);
+                let readiness = phase.readiness_lines(&workspace.config).await;
                 let no_row = indented(&qta(
                     "cli-quickstart-plugins-ready-no-row",
                     &[("name", FIXTURE_NAME), ("command", &create)],
@@ -3012,8 +3064,8 @@ hosts = ["api.example.com"]
         }
     }
 
-    #[test]
-    fn a_tool_without_a_config_row_is_reported_by_what_its_manifest_needs() {
+    #[tokio::test]
+    async fn a_tool_without_a_config_row_is_reported_by_what_its_manifest_needs() {
         // A tool that requires no setting but requests network access: install
         // owes it a row, where the operator's grant lives.
         let networked = r#"name = "net-tool"
@@ -3072,7 +3124,7 @@ capabilities = ["tool"]
             activation_changed: false,
         };
 
-        let readiness = phase.readiness_lines(&workspace.config);
+        let readiness = phase.readiness_lines(&workspace.config).await;
 
         let text = readiness.join("\n");
         for (name, manifest) in packages {
@@ -3357,7 +3409,7 @@ capabilities = ["tool"]
             );
             assert!(workspace.config.plugins.entries.is_empty());
             assert_eq!(workspace.config_bytes(), before);
-            assert!(phase.readiness_lines(&workspace.config).is_empty());
+            assert!(phase.readiness_lines(&workspace.config).await.is_empty());
             assert!(
                 server
                     .received_requests()
@@ -3471,7 +3523,7 @@ egress_hosts = ["{unrelated_host}"]
         );
         // The resolver accepts the existing row, which holds both required
         // settings, so the instance is active; the status prints no value.
-        let readiness = phase.readiness_lines(&workspace.config).join("\n");
+        let readiness = phase.readiness_lines(&workspace.config).await.join("\n");
         assert!(
             readiness.contains(&qta(
                 "cli-quickstart-plugins-ready",
@@ -3619,7 +3671,7 @@ egress_hosts = ["{unrelated_host}"]
             "the activation plan alone would admit the instance"
         );
 
-        let readiness = phase.readiness_lines(&workspace.config);
+        let readiness = phase.readiness_lines(&workspace.config).await;
         assert_reported_missing(&readiness, &key);
         let text = readiness.join("\n");
         let output = prompter.output();
@@ -3633,7 +3685,7 @@ egress_hosts = ["{unrelated_host}"]
         // Held back by a flag, the verdict comes first and the missing
         // settings still follow it.
         workspace.config.plugins.enabled = false;
-        let held_back = phase.readiness_lines(&workspace.config);
+        let held_back = phase.readiness_lines(&workspace.config).await;
         assert_eq!(
             held_back.get(2),
             Some(&indented(&qta(
@@ -3657,7 +3709,7 @@ egress_hosts = ["{unrelated_host}"]
         row.config
             .insert("api_token".to_string(), "set-later".to_string());
         row.config.insert("label".to_string(), "demo".to_string());
-        let readiness = phase.readiness_lines(&workspace.config).join("\n");
+        let readiness = phase.readiness_lines(&workspace.config).await.join("\n");
         assert!(
             readiness.contains(&qta(
                 "cli-quickstart-plugins-ready",
@@ -3745,7 +3797,7 @@ egress_hosts = ["{unrelated_host}"]
             }
         );
 
-        let readiness = phase.readiness_lines(&workspace.config);
+        let readiness = phase.readiness_lines(&workspace.config).await;
         assert_reported_missing(&readiness, &key);
         let text = readiness.join("\n");
         for printed in [&text, &output] {
@@ -3797,12 +3849,95 @@ egress_hosts = ["{unrelated_host}"]
                 instance_key: key.clone()
             }
         );
-        assert_reported_missing(&phase.readiness_lines(&workspace.config), &key);
+        assert_reported_missing(&phase.readiness_lines(&workspace.config).await, &key);
         server.verify().await;
     }
 
-    #[test]
-    fn a_duplicated_row_is_reported_unavailable_rather_than_active() {
+    #[tokio::test]
+    async fn an_installed_package_that_does_not_load_is_never_reported_active() {
+        let server = MockServer::start().await;
+        serve_valid_archive(&server, 0).await;
+        let mut workspace = Workspace::new();
+        // Installed before this run without the load check, as
+        // `plugin install --no-verify` installs it, with a row holding both
+        // required settings and activation on: everything but the load
+        // check says active.
+        install_without_a_row(&workspace);
+        let key = fixture_instance_key();
+        workspace
+            .config
+            .plugins
+            .entries
+            .push(crate::config::schema::PluginEntryConfig {
+                name: key.clone(),
+                config: HashMap::from([
+                    ("api_token".to_string(), "x".to_string()),
+                    ("label".to_string(), "demo".to_string()),
+                ]),
+                ..Default::default()
+            });
+        workspace.config.plugins.enabled = true;
+        workspace.config.plugins.auto_discover = true;
+        // Fewer instances than the component needs, so the load check that
+        // `plugin info` runs refuses it.
+        workspace.config.plugins.limits.max_instances = 1;
+        let selection = selection(fixture_entry(&server, Some(archive_digest())));
+        let mut prompter = ScriptedPrompter::new([]);
+
+        let phase = run(&mut workspace, &selection, &mut prompter)
+            .await
+            .expect("the phase completes");
+
+        prompter.assert_done();
+        assert_eq!(
+            phase.outcomes,
+            vec![PackageOutcome::AlreadyInstalled {
+                name: FIXTURE_NAME.to_string(),
+                seeded_row: false,
+            }]
+        );
+        assert_eq!(
+            verdict(&workspace.config),
+            ToolInstanceAdmission::Admitted {
+                instance_key: key.clone()
+            },
+            "the activation plan alone would admit the instance"
+        );
+        let active = qta(
+            "cli-quickstart-plugins-ready",
+            &[("name", FIXTURE_NAME), ("key", &key)],
+        );
+        let info = zeroclaw_command(&workspace.config, "plugin info tool-fixture");
+        assert!(info.contains("--config-dir"), "{info}");
+
+        let readiness = phase.readiness_lines(&workspace.config).await;
+
+        let text = readiness.join("\n");
+        assert!(
+            !text.contains(&active),
+            "a package that does not load is never reported active: {text}"
+        );
+        assert_eq!(
+            readiness.get(2),
+            Some(&indented(&qta(
+                "cli-quickstart-plugins-ready-does-not-load",
+                &[("name", FIXTURE_NAME), ("command", &info)]
+            ))),
+            "the status says it does not load and gives the command that shows why: {text}"
+        );
+
+        // With the instances the component needs, the same package loads, and
+        // the status reports it active.
+        workspace.config.plugins.limits.max_instances =
+            Config::default().plugins.limits.max_instances;
+        let readiness = phase.readiness_lines(&workspace.config).await.join("\n");
+        assert!(readiness.contains(&active), "{readiness}");
+        assert!(!readiness.contains(&info), "{readiness}");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_duplicated_row_is_reported_unavailable_rather_than_active() {
         let mut workspace = Workspace::new();
         install_without_a_row(&workspace);
         workspace.config.plugins.enabled = true;
@@ -3827,7 +3962,7 @@ egress_hosts = ["{unrelated_host}"]
             activation_changed: false,
         };
 
-        let readiness = phase.readiness_lines(&workspace.config);
+        let readiness = phase.readiness_lines(&workspace.config).await;
 
         assert_eq!(
             readiness.get(2),
@@ -3852,8 +3987,8 @@ egress_hosts = ["{unrelated_host}"]
         );
     }
 
-    #[test]
-    fn a_row_with_every_required_key_but_a_value_the_schema_rejects_is_not_reported_active() {
+    #[tokio::test]
+    async fn a_row_with_every_required_key_but_a_value_the_schema_rejects_is_not_reported_active() {
         let mut workspace = Workspace::new();
         install_without_a_row(&workspace);
         workspace.config.plugins.enabled = true;
@@ -3883,7 +4018,7 @@ egress_hosts = ["{unrelated_host}"]
             activation_changed: false,
         };
 
-        let readiness = phase.readiness_lines(&workspace.config);
+        let readiness = phase.readiness_lines(&workspace.config).await;
 
         assert_eq!(
             verdict(&workspace.config),
@@ -3941,8 +4076,8 @@ x-secret = true
 type = "string"
 "#;
 
-    #[test]
-    fn a_required_setting_outside_the_portable_grammar_is_named_without_a_command() {
+    #[tokio::test]
+    async fn a_required_setting_outside_the_portable_grammar_is_named_without_a_command() {
         let mut workspace = Workspace::new();
         install_with_manifest(&workspace, "strict-tool", STRICT_MANIFEST);
         workspace.config.plugins.enabled = true;
@@ -3965,7 +4100,7 @@ type = "string"
             activation_changed: false,
         };
 
-        let readiness = phase.readiness_lines(&workspace.config);
+        let readiness = phase.readiness_lines(&workspace.config).await;
 
         let text = readiness.join("\n");
         assert!(

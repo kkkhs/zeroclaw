@@ -833,6 +833,7 @@ cli-quickstart-plugins-ready-plugins-disabled = {$name}: inactive, because plugi
 cli-quickstart-plugins-ready-auto-discover-disabled = {$name}: inactive, because plugins.auto_discover is off.
 cli-quickstart-plugins-ready-not-installed = {$name}: not installed.
 cli-quickstart-plugins-ready-not-a-tool = {$name}: installed, but it provides no tool.
+cli-quickstart-plugins-ready-does-not-load = {$name}: installed, but it does not load against this host, so ZeroClaw skips it at startup. See why with: {$command}
 cli-quickstart-plugins-ready-ceiling = {$name}: inactive, because the plugins.max_active_instances limit ({$max}) is reached.
 cli-quickstart-plugins-ready-unknown = {$name}: status unavailable: {$error}
 cli-quickstart-plugins-ready-rejected = {$name}: installed, but not usable, because its config entry does not satisfy the plugin's settings schema: {$error}

@@ -741,6 +741,7 @@ cli-quickstart-plugins-ready-plugins-disabled = {$name}：未激活，因为 plu
 cli-quickstart-plugins-ready-auto-discover-disabled = {$name}：未激活，因为 plugins.auto_discover 已关闭。
 cli-quickstart-plugins-ready-not-installed = {$name}：未安装。
 cli-quickstart-plugins-ready-not-a-tool = {$name}：已安装，但不提供任何工具。
+cli-quickstart-plugins-ready-does-not-load = {$name}：已安装，但无法在此主机上加载，因此 ZeroClaw 会在启动时跳过它。可用以下命令查看原因：{$command}
 cli-quickstart-plugins-ready-ceiling = {$name}：未激活，因为已达到 plugins.max_active_instances 上限（{$max}）。
 cli-quickstart-plugins-ready-unknown = {$name}：状态不可用：{$error}
 cli-quickstart-plugins-ready-rejected = {$name}：已安装，但无法使用，因为其配置条目不符合插件的设置架构：{$error}

@@ -208,6 +208,14 @@ declares destinations, a separate line gives the command that grants them once
 the entry exists. A plugin with nothing to configure and no network access
 needs no config entry.
 
+A picked plugin that was already installed may never have passed the load
+check, for example when it was installed with
+`zeroclaw plugin install --no-verify`, so Quickstart runs the check
+`zeroclaw plugin info` runs before it reports the plugin. When the plugin does
+not load against this host, ZeroClaw skips it at startup, so its status says
+that instead of calling it active and gives the `zeroclaw plugin info` command
+that shows why.
+
 Quickstart writes the config file and never signals a running daemon. A daemon
 that is already running keeps the configuration it loaded, so it uses the new
 plugins, their settings, and any change to plugin activation only after it
