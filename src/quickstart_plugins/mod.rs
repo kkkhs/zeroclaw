@@ -2906,20 +2906,24 @@ capabilities = ["tool"]
         let key = fixture_instance_key();
         let plugins_dir = toml::Value::String(dir.path().join("plugins").display().to_string());
         // A row left behind by `plugin remove`, holding encrypted settings and
-        // a grant, next to a 1Password reference and activation already on.
-        // The grant names a host the manifest does not declare, so extending
-        // it with the declaration could not go unnoticed.
+        // a grant, next to a 1Password reference, with activation off so the
+        // run saves the config file. The grant names a host the manifest does
+        // not declare, so extending it with the declaration could not go
+        // unnoticed.
         let unrelated_host = "unrelated.example.org";
+        let encrypted_token = r#"api_token = "enc2:bm90LWEtcmVhbC1jaXBoZXJ0ZXh0""#;
+        let encrypted_label = r#"label = "enc2:YWxzby1ub3QtcmVhbA""#;
+        let onepassword = r#"api_key = "op://zeroclaw/provider/openai-api-key""#;
         let text = format!(
             r#"schema_version = {version}
 
 [providers.models.openai.default]
 model = "gpt-5"
-api_key = "op://zeroclaw/provider/openai-api-key"
+{onepassword}
 
 [plugins]
-enabled = true
-auto_discover = true
+enabled = false
+auto_discover = false
 plugins_dir = {plugins_dir}
 
 [[plugins.entries]]
@@ -2927,8 +2931,8 @@ name = "{key}"
 egress_hosts = ["{unrelated_host}"]
 
 [plugins.entries.config]
-api_token = "enc2:bm90LWEtcmVhbC1jaXBoZXJ0ZXh0"
-label = "enc2:YWxzby1ub3QtcmVhbA"
+{encrypted_token}
+{encrypted_label}
 "#,
             version = crate::config::migration::CURRENT_SCHEMA_VERSION,
         );
@@ -2938,10 +2942,11 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
         config.config_path = config_path;
         config.data_dir = dir.path().join("data");
         let mut workspace = Workspace { dir, config };
-        let before = workspace.config_bytes();
         let row_before = workspace.row(&key).cloned().expect("the row exists");
         let selection = selection(fixture_entry(&server, Some(archive_digest())));
-        let mut prompter = ScriptedPrompter::new([]);
+        // The row exists, so nothing about it is asked; activation is turned
+        // on, which saves both flags into the same file.
+        let mut prompter = ScriptedPrompter::new([Answer::Confirm(Some(true))]);
 
         let phase = run(&mut workspace, &selection, &mut prompter)
             .await
@@ -2954,11 +2959,25 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
                 name: FIXTURE_NAME.to_string(),
             }]
         );
+        assert!(phase.activation_changed, "the run saved the config file");
         assert!(workspace.package_dir().is_dir(), "the package is installed");
+        let after = String::from_utf8(workspace.config_bytes()).expect("config.toml is UTF-8");
+        let on_disk = workspace.config_on_disk();
+        assert!(
+            flag_on_disk(&on_disk, "enabled") && flag_on_disk(&on_disk, "auto_discover"),
+            "the save changed what it was meant to: {after}"
+        );
+        for untouched in [encrypted_token, encrypted_label, onepassword] {
+            assert!(
+                after.lines().any(|line| line == untouched),
+                "{untouched} must survive the save byte for byte: {after}"
+            );
+        }
         assert_eq!(
-            workspace.config_bytes(),
-            before,
-            "an existing row is neither re-prompted, re-granted nor re-saved"
+            after,
+            text.replace("enabled = false", "enabled = true")
+                .replace("auto_discover = false", "auto_discover = true"),
+            "the save rewrote only the two activation flags"
         );
         let row_after = workspace.row(&key).expect("the row remains");
         assert_eq!(row_after.config, row_before.config);
@@ -2978,8 +2997,8 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
                     .collect::<Vec<_>>()),
             Some(vec![unrelated_host])
         );
-        // The existing row holds both required settings, so the instance is
-        // active; the status reads their presence, never their values.
+        // The resolver accepts the existing row, which holds both required
+        // settings, so the instance is active; the status prints no value.
         let readiness = phase.readiness_lines(&workspace.config).join("\n");
         assert!(
             readiness.contains(&qta(
