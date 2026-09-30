@@ -2253,11 +2253,11 @@ hosts = ["api.example.com"]
 
     #[tokio::test]
     async fn a_bad_digest_a_server_error_or_a_stalled_download_changes_nothing() {
-        // Only the stalled download runs against a short bound. The other
-        // two fail on their own, and each has to say why rather than pass by
-        // timing out under load.
+        // Only the stalled download runs against a short read bound, the one
+        // that ends a stall. The other two fail on their own, and each has to
+        // say why rather than pass by timing out under load.
         let stall_bound = RegistryTimeouts {
-            archive: Duration::from_millis(300),
+            read: Duration::from_millis(300),
             ..RegistryTimeouts::default()
         };
         /// One failed download: its name, the archive response, the digest

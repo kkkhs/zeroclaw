@@ -20,11 +20,17 @@ const REGISTRY_URL_ENV: &str = "ZEROCLAW_PLUGIN_REGISTRY_URL";
 /// How long a registry request may spend connecting. An unreachable or
 /// black-holed host fails here instead of hanging the command.
 const REGISTRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a registry response may deliver nothing: from the request until
+/// its headers arrive, then between reads of its body. A stalled server fails
+/// here, while a slow download that keeps delivering data does not.
+const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Whole-request bound on fetching the registry index, body included.
 const REGISTRY_INDEX_TIMEOUT: Duration = Duration::from_secs(30);
-/// Whole-request bound on downloading one plugin archive, body included. It
-/// is the longest bound because an archive may approach the size cap.
-const REGISTRY_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Whole-request ceiling on downloading one plugin archive, body included.
+/// Stalls end at [`REGISTRY_READ_TIMEOUT`], so this only bounds a download
+/// that keeps trickling in: it gives a link of about 30 KB/s the time to fetch
+/// an archive at the size cap.
+const REGISTRY_ARCHIVE_TIMEOUT: Duration = Duration::from_mins(30);
 
 pub(crate) struct DownloadedPlugin {
     _temp_dir: TempDir,
@@ -106,6 +112,8 @@ pub(crate) async fn download_registry_entry(
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RegistryTimeouts {
     pub(crate) connect: Duration,
+    /// The longest silence on any request; see [`REGISTRY_READ_TIMEOUT`].
+    pub(crate) read: Duration,
     pub(crate) index: Duration,
     pub(crate) archive: Duration,
 }
@@ -114,6 +122,7 @@ impl Default for RegistryTimeouts {
     fn default() -> Self {
         Self {
             connect: REGISTRY_CONNECT_TIMEOUT,
+            read: REGISTRY_READ_TIMEOUT,
             index: REGISTRY_INDEX_TIMEOUT,
             archive: REGISTRY_ARCHIVE_TIMEOUT,
         }
@@ -131,6 +140,7 @@ impl RegistryClient {
     pub(crate) fn new(timeouts: RegistryTimeouts) -> Result<Self> {
         let http = reqwest::Client::builder()
             .connect_timeout(timeouts.connect)
+            .read_timeout(timeouts.read)
             .build()
             .context("building the plugin registry HTTP client")?;
         Ok(Self { http, timeouts })
@@ -721,7 +731,32 @@ capabilities = ["tool"]
     }
 
     #[tokio::test]
-    async fn a_stalled_archive_download_fails_at_the_client_bound() {
+    async fn a_stalled_archive_download_fails_at_the_read_bound() {
+        let server = MockServer::start().await;
+        serve_sample_archive(
+            &server,
+            ResponseTemplate::new(200)
+                .set_body_bytes(sample_archive())
+                .set_delay(STALLED_RESPONSE_DELAY),
+        )
+        .await;
+        // The whole-request ceiling stays at its production value, so only
+        // the read bound can end the request before the server answers.
+        let client = RegistryClient::new(RegistryTimeouts {
+            read: TEST_TIMEOUT,
+            ..RegistryTimeouts::default()
+        })
+        .unwrap();
+
+        let Err(err) = client.download_entry(&sample_entry(&server, None)).await else {
+            panic!("a stalled archive download must fail");
+        };
+
+        assert!(is_timeout(&err), "expected a timeout, got {err:#}");
+    }
+
+    #[tokio::test]
+    async fn the_archive_ceiling_still_bounds_the_whole_download() {
         let server = MockServer::start().await;
         serve_sample_archive(
             &server,
@@ -737,10 +772,74 @@ capabilities = ["tool"]
         .unwrap();
 
         let Err(err) = client.download_entry(&sample_entry(&server, None)).await else {
-            panic!("a stalled archive download must fail");
+            panic!("a download past the ceiling must fail");
         };
 
         assert!(is_timeout(&err), "expected a timeout, got {err:#}");
+    }
+
+    /// The read bound ends a stall, not a slow download: an archive that
+    /// keeps arriving in pieces, each well inside the bound, completes even
+    /// though the whole transfer takes longer than the bound.
+    #[tokio::test]
+    async fn a_slow_archive_download_that_keeps_delivering_completes() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        const READ_BOUND: Duration = Duration::from_secs(1);
+        const GAP: Duration = Duration::from_millis(200);
+        const PIECES: usize = 8;
+
+        let archive = sample_archive();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let entry = PluginRegistryEntry {
+            name: "sample".to_string(),
+            version: "0.1.0".to_string(),
+            description: None,
+            author: None,
+            capabilities: vec!["tool".to_string()],
+            url: format!("http://{address}{SAMPLE_ARCHIVE_PATH}"),
+            sha256: Some(hex::encode(Sha256::digest(&archive))),
+        };
+        let client = RegistryClient::new(RegistryTimeouts {
+            read: READ_BOUND,
+            ..RegistryTimeouts::default()
+        })
+        .unwrap();
+
+        // A server that sends the headers at once and then the body in
+        // pieces, pausing before each one.
+        let trickle = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.set_nodelay(true).unwrap();
+            let mut head = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "the client closed before sending its request");
+                head.extend_from_slice(&buffer[..read]);
+            }
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                archive.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            for piece in archive.chunks(archive.len().div_ceil(PIECES)) {
+                tokio::time::sleep(GAP).await;
+                socket.write_all(piece).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+        };
+        let started = std::time::Instant::now();
+
+        let (downloaded, ()) = tokio::join!(client.download_entry(&entry), trickle);
+
+        let downloaded = downloaded.expect("a download that keeps delivering completes");
+        assert_eq!(downloaded.manifest().name, "sample");
+        assert!(
+            started.elapsed() > READ_BOUND,
+            "the transfer outlasted the read bound, so only the pauses were bounded"
+        );
     }
 
     fn sample_archive() -> Vec<u8> {
