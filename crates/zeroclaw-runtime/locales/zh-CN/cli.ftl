@@ -737,6 +737,7 @@ cli-quickstart-plugins-ready-not-installed = {$name}：未安装。
 cli-quickstart-plugins-ready-not-a-tool = {$name}：已安装，但不提供任何工具。
 cli-quickstart-plugins-ready-ceiling = {$name}：未激活，因为已达到 plugins.max_active_instances 上限（{$max}）。
 cli-quickstart-plugins-ready-unknown = {$name}：状态不可用：{$error}
+cli-quickstart-plugins-ready-missing-settings = {$name}：已安装，但在设置其必需设置之前无法使用：{$keys}。请用以下命令逐一设置：
 cli-quickstart-plugins-readiness-unavailable = 插件状态不可用：{$error}
 cli-quickstart-plugins-restart-note = 运行中的守护进程会在下次构建工具注册表时加载新的工具插件。通道插件需要重启守护进程。
 cli-quickstart-plugins-stopped = Quickstart 在创建 agent 之前已停止。本次运行中安装或配置的插件仍会保留：{$names}。

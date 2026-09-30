@@ -738,6 +738,7 @@ cli-quickstart-plugins-ready-not-installed = {$name}: no instalado.
 cli-quickstart-plugins-ready-not-a-tool = {$name}: instalado, pero no proporciona ninguna herramienta.
 cli-quickstart-plugins-ready-ceiling = {$name}: inactivo, porque se alcanzó el límite de plugins.max_active_instances ({$max}).
 cli-quickstart-plugins-ready-unknown = {$name}: estado no disponible: {$error}
+cli-quickstart-plugins-ready-missing-settings = {$name}: instalado, pero no se puede usar hasta que se establezcan sus ajustes obligatorios: {$keys}. Establece cada uno con:
 cli-quickstart-plugins-readiness-unavailable = El estado de los complementos no está disponible: {$error}
 cli-quickstart-plugins-restart-note = Un daemon en ejecución incorpora los nuevos complementos de herramienta la próxima vez que construye su registro de herramientas. Los complementos de canal requieren reiniciar el daemon.
 cli-quickstart-plugins-stopped = Quickstart se detuvo antes de crear el agente. Los complementos instalados o configurados en esta ejecución se mantienen: {$names}.

@@ -736,6 +736,7 @@ cli-quickstart-plugins-ready-not-installed = {$name}: インストールされ�
 cli-quickstart-plugins-ready-not-a-tool = {$name}: インストール済みですが、ツールを提供していません。
 cli-quickstart-plugins-ready-ceiling = {$name}: plugins.max_active_instances の上限 ({$max}) に達しているため無効です。
 cli-quickstart-plugins-ready-unknown = {$name}: 状態を取得できません: {$error}
+cli-quickstart-plugins-ready-missing-settings = {$name}: インストール済みですが、必須の設定が設定されるまで使用できません: {$keys}。それぞれ次のコマンドで設定してください:
 cli-quickstart-plugins-readiness-unavailable = プラグインの状態を取得できません: {$error}
 cli-quickstart-plugins-restart-note = 実行中のデーモンは、次にツールレジストリを構築するときに新しいツールプラグインを取り込みます。チャンネルプラグインにはデーモンの再起動が必要です。
 cli-quickstart-plugins-stopped = クイックスタートはエージェントを作成する前に停止しました。今回の実行でインストールまたは設定したプラグインはそのまま残ります: {$names}。

@@ -1241,7 +1241,7 @@ mod tests {
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 21] = [
+        let cases: [QuickstartPluginCase<'_>; 22] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1361,6 +1361,13 @@ mod tests {
                 "cli-quickstart-plugins-ready-ceiling",
                 &[("name", "weather-tool"), ("max", "16")],
                 &["weather-tool", "plugins.max_active_instances", "16"],
+            ),
+            // An instance installed without its required settings is never
+            // reported active; the settings it lacks are named.
+            (
+                "cli-quickstart-plugins-ready-missing-settings",
+                &[("name", "weather-tool"), ("keys", "api_key, units")],
+                &["weather-tool", "api_key, units"],
             ),
             (
                 "cli-quickstart-plugins-apply-failed-state-activated",

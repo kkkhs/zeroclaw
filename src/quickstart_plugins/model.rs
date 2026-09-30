@@ -633,12 +633,26 @@ impl FailureStage {
     }
 }
 
+/// Required settings of an installed instance that were left unset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UnsetSettings {
+    /// The `[[plugins.entries]]` row the settings belong to.
+    pub(crate) instance_key: String,
+    /// The property names, never their values.
+    pub(crate) keys: Vec<String>,
+}
+
 /// What the Create-time plugin phase did with one selected package.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PackageOutcome {
     /// This run published it through the canonical publish-and-seed
-    /// transaction.
-    Installed { name: String },
+    /// transaction. `unset_required` holds the required settings the operator
+    /// chose to install it without: the runtime resolver rejects every call
+    /// to the instance until each one is set.
+    Installed {
+        name: String,
+        unset_required: Option<UnsetSettings>,
+    },
     /// It was installed before this run and left as it was; `seeded_row` is
     /// whether this run created its missing config row.
     AlreadyInstalled { name: String, seeded_row: bool },
@@ -654,11 +668,23 @@ impl PackageOutcome {
     #[must_use]
     pub(crate) fn name(&self) -> &str {
         match self {
-            Self::Installed { name }
+            Self::Installed { name, .. }
             | Self::AlreadyInstalled { name, .. }
             | Self::Skipped { name }
             | Self::Refused { name, .. }
             | Self::Failed { name, .. } => name,
+        }
+    }
+
+    /// The required settings this run installed the package without.
+    #[must_use]
+    pub(crate) fn unset_required(&self) -> Option<&UnsetSettings> {
+        match self {
+            Self::Installed { unset_required, .. } => unset_required.as_ref(),
+            Self::AlreadyInstalled { .. }
+            | Self::Skipped { .. }
+            | Self::Refused { .. }
+            | Self::Failed { .. } => None,
         }
     }
 
@@ -1032,6 +1058,7 @@ mod tests {
     fn outcomes_report_what_changed() {
         let installed = PackageOutcome::Installed {
             name: "a".to_string(),
+            unset_required: None,
         };
         let seeded = PackageOutcome::AlreadyInstalled {
             name: "b".to_string(),
@@ -1046,6 +1073,21 @@ mod tests {
             stage: FailureStage::Download,
         };
         assert!(installed.changed_state() && installed.is_installed());
+        assert_eq!(installed.unset_required(), None);
+        let unconfigured = PackageOutcome::Installed {
+            name: "e".to_string(),
+            unset_required: Some(UnsetSettings {
+                instance_key: "zpi1_e".to_string(),
+                keys: vec!["api_token".to_string()],
+            }),
+        };
+        assert!(unconfigured.changed_state() && unconfigured.is_installed());
+        assert_eq!(
+            unconfigured
+                .unset_required()
+                .map(|unset| unset.keys.as_slice()),
+            Some(&["api_token".to_string()][..])
+        );
         assert!(seeded.changed_state() && seeded.is_installed());
         assert!(!untouched.changed_state() && untouched.is_installed());
         assert!(!failed.changed_state() && !failed.is_installed());

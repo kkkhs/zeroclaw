@@ -829,6 +829,7 @@ cli-quickstart-plugins-ready-not-installed = {$name}: not installed.
 cli-quickstart-plugins-ready-not-a-tool = {$name}: installed, but it provides no tool.
 cli-quickstart-plugins-ready-ceiling = {$name}: inactive, because the plugins.max_active_instances limit ({$max}) is reached.
 cli-quickstart-plugins-ready-unknown = {$name}: status unavailable: {$error}
+cli-quickstart-plugins-ready-missing-settings = {$name}: installed, but not usable until its required settings are set: {$keys}. Set each one with:
 cli-quickstart-plugins-readiness-unavailable = Plugin status is unavailable: {$error}
 cli-quickstart-plugins-restart-note = A running daemon picks up new tool plugins the next time it builds its tool registry. Channel plugins need a daemon restart.
 cli-quickstart-plugins-stopped = Quickstart stopped before creating the agent. Plugins installed or configured in this run stay in place: {$names}.

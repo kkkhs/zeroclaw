@@ -159,9 +159,11 @@ on later. When both settings are already on, there is nothing to ask.
 Once the agent is created, Quickstart prints the status of each picked plugin
 that is installed: active as a tool, with its config entry key, or the reason
 it is not active, such as `plugins.enabled` or `plugins.auto_discover` being
-off or the `plugins.max_active_instances` limit being reached. A daemon that is
-already running picks up new tool plugins the next time it builds its tool
-registry; channel plugins need a daemon restart.
+off or the `plugins.max_active_instances` limit being reached. A plugin you
+installed without its required settings is not usable until they are set, so
+its status names them, each with the `zeroclaw config set` command that asks
+for its value. A daemon that is already running picks up new tool plugins the
+next time it builds its tool registry; channel plugins need a daemon restart.
 
 If Quickstart stops before the agent is created (Ctrl+C during the plugin step,
 or an agent step that fails), the plugins it already installed stay installed
