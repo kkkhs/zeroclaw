@@ -130,17 +130,19 @@ plugins one at a time, through the pipeline `zeroclaw plugin install` uses:
    placeholder to fill in.
 5. For a plugin whose manifest has a `config_schema`, Quickstart prompts for
    the settings it describes: required properties first, optional ones only if
-   you ask for them. Properties marked `x-secret` are masked as you type them.
-   The values are checked against the schema before anything is written; after a
-   failed check you get one more try, then Quickstart asks whether to install
-   the plugin without them. Pressing Esc at a required setting that is secret
-   or picked from a list skips the plugin. Quickstart prompts only for
-   properties whose names are in the portable key grammar (up to 128 ASCII
-   letters, digits, `.`, `-` and `_`). It names the others so that you can set
-   them later with `zeroclaw config set`. When a required property is one of
-   them, or a name the schema requires without declaring it, no answers could
-   pass the check, so Quickstart asks for no settings and goes straight to
-   asking whether to install the plugin without them.
+   you ask for them. Properties marked `x-secret` are masked as you type them,
+   and spaces or line breaks around a secret value are dropped, as
+   `zeroclaw config set` drops them. The values are checked against the schema
+   before anything is written; after a failed check you get one more try, then
+   Quickstart asks whether to install the plugin without them. Pressing Esc at
+   a required setting that is secret or picked from a list skips the plugin.
+   Quickstart prompts only for properties whose names are in the portable key
+   grammar (up to 128 ASCII letters, digits, `.`, `-` and `_`). It names the
+   others so that you can set them later with `zeroclaw config set`. When a
+   required property is one of them, or a name the schema requires without
+   declaring it, no answers could pass the check, so Quickstart asks for no
+   settings and goes straight to asking whether to install the plugin without
+   them.
 6. It publishes the package and seeds its config entry in the same transaction
    `zeroclaw plugin install` uses, then saves the settings the way
    `zeroclaw config set` does. If seeding the entry fails, the transaction

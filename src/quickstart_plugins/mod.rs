@@ -3620,6 +3620,72 @@ egress_hosts = ["{unrelated_host}"]
     }
 
     #[tokio::test]
+    async fn a_secret_typed_with_surrounding_whitespace_is_stored_trimmed() {
+        let server = MockServer::start().await;
+        serve_valid_archive(&server, 1).await;
+        let mut workspace = Workspace::new();
+        let selection = selection(fixture_entry(&server, Some(archive_digest())));
+        // A pasted token that brings a space and a line break along, which
+        // `config set` trims from what its masked prompt reads.
+        let mut prompter = ScriptedPrompter::new([
+            Answer::Select(Some(WITHHOLD)),
+            Answer::Field(Some(format!(" {SECRET} \r\n"))),
+            Answer::Field(Some(" demo ".to_string())),
+            Answer::Confirm(Some(false)),
+            Answer::Confirm(Some(false)),
+        ]);
+
+        let phase = run(&mut workspace, &selection, &mut prompter)
+            .await
+            .expect("the phase completes");
+
+        prompter.assert_done();
+        assert_eq!(
+            phase.outcomes,
+            vec![PackageOutcome::Installed {
+                name: FIXTURE_NAME.to_string(),
+            }]
+        );
+        let key = fixture_instance_key();
+        // Read back as the runtime reads it: decrypted from the file on disk.
+        // The values are compared, never printed.
+        let stored = row_on_disk(&workspace.config_on_disk(), &key)
+            .and_then(|row| {
+                row.get("config")?
+                    .get("api_token")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .expect("the secret setting is persisted");
+        assert!(
+            stored.starts_with("enc2:"),
+            "the secret is encrypted at rest"
+        );
+        let decrypted = crate::security::SecretStore::new(workspace.dir.path(), true)
+            .decrypt(&stored)
+            .expect("the stored secret decrypts");
+        assert!(
+            decrypted == SECRET,
+            "the stored secret is the token without the whitespace around it"
+        );
+        let row = workspace.row(&key).expect("the row is seeded");
+        assert!(
+            row.config
+                .get("api_token")
+                .is_some_and(|value| value == SECRET),
+            "the config Quickstart keeps holds the trimmed secret too"
+        );
+        assert_eq!(
+            row.config.get("label").map(String::as_str),
+            Some(" demo "),
+            "a setting that is not secret is still stored exactly as typed"
+        );
+        let output = prompter.output();
+        assert!(!output.contains(SECRET), "the secret is never printed");
+        server.verify().await;
+    }
+
+    #[tokio::test]
     async fn installing_without_required_settings_is_never_reported_active() {
         let server = MockServer::start().await;
         serve_valid_archive(&server, 1).await;

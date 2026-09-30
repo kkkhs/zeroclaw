@@ -467,12 +467,16 @@ pub(crate) fn field_descriptor(field: &ConfigField, hint: Option<&str>) -> Field
 /// for one answer, or `None` when the answer leaves the property unset.
 ///
 /// Instance config is a string map typed at resolution time: a string
-/// property is stored exactly as typed, and every other type is JSON text
-/// (`true`, `42`, `1.5`, `["a", "b"]`, `{"k": "v"}`) the resolver parses
-/// against the schema. Surrounding whitespace is dropped from JSON text only.
+/// property is stored as typed, and every other type is JSON text (`true`,
+/// `42`, `1.5`, `["a", "b"]`, `{"k": "v"}`) the resolver parses against the
+/// schema. Surrounding whitespace is dropped from JSON text, and from a
+/// secret, which `config set` reads through a masked prompt and trims, so a
+/// pasted token's stray space or line break never becomes part of it. Any
+/// other string keeps it.
 #[must_use]
 pub(crate) fn encode_value(field: &ConfigField, raw: &str) -> Option<String> {
     let value = match field.kind {
+        ValueKind::String if field.secret => raw.trim(),
         ValueKind::String => raw,
         ValueKind::Boolean
         | ValueKind::Integer
@@ -1152,6 +1156,15 @@ mod tests {
             Some(" eu west ".to_string()),
             "a string is stored exactly as typed"
         );
+        // `config set` trims what its masked prompt reads, so a secret loses
+        // the space and the line break a paste brings along, and one that is
+        // only whitespace leaves the setting unset.
+        assert!(field("api_token").secret);
+        assert_eq!(
+            encode_value(field("api_token"), " tok en \r\n"),
+            Some("tok en".to_string())
+        );
+        assert_eq!(encode_value(field("api_token"), " \n "), None);
         assert_eq!(encode_value(field("retries"), " 5 "), Some("5".to_string()));
         assert_eq!(
             encode_value(field("tags"), " [\"a\", \"b\"] "),
