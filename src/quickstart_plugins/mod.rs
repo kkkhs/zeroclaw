@@ -433,8 +433,9 @@ impl PhaseHalt {
 }
 
 /// Say what this run installed or configured before it stopped. Every package
-/// it names went through the whole publish-and-seed transaction; none is half
-/// published.
+/// it names went through the whole publish-and-seed transaction, except one
+/// whose failed publish could not be rolled back, which stays on disk and is
+/// named for that reason.
 fn print_progress(outcomes: &[PackageOutcome]) {
     let names = changed_names(outcomes);
     if names.is_empty() {
@@ -526,12 +527,13 @@ impl CreatePhase {
             (true, true) => qta("cli-quickstart-plugins-apply-failed-activated", &[]),
         };
         let mut lines = vec![qta("cli-quickstart-plugins-agent-not-created", &[]), state];
-        // Only a package this run published gets a removal command. One that
-        // was installed before this run stays, whatever happened to its row.
+        // Only a package this run published gets a removal command, including
+        // one whose failed publish could not be rolled back. One that was
+        // installed before this run stays, whatever happened to its row.
         let published: Vec<&str> = self
             .outcomes
             .iter()
-            .filter(|outcome| matches!(outcome, PackageOutcome::Installed { .. }))
+            .filter(|outcome| outcome.published_by_run())
             .map(PackageOutcome::name)
             .collect();
         if !published.is_empty() {
@@ -757,7 +759,8 @@ fn readiness_line(name: &str, verdict: &anyhow::Result<ToolInstanceAdmission>) -
 /// A [`PhaseHalt`] when the agent step would refuse `submission`, which is
 /// checked before any plugin is touched, or when a prompt is interrupted or
 /// fails. Every package the halt reports as installed went through the whole
-/// publish-and-seed transaction; the rest of the selection was not touched.
+/// publish-and-seed transaction, or failed it without being rolled back, and
+/// the halt says which; the rest of the selection was not touched.
 pub(crate) async fn run_create_phase(
     config: &mut Config,
     row: &PluginsRow,
@@ -845,7 +848,10 @@ impl PhaseLog {
 
     fn outcome(&self, outcome: &PackageOutcome) {
         let attrs = self.outcome_attrs(outcome);
-        if matches!(outcome, PackageOutcome::Failed { .. }) {
+        if matches!(
+            outcome,
+            PackageOutcome::Failed { .. } | PackageOutcome::RollbackFailed { .. }
+        ) {
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
@@ -958,7 +964,8 @@ fn has_row(config: &Config, instance_key: &str) -> bool {
 /// One selected package, from the registry entry to an installed, seeded and
 /// configured instance. Every failure before the publish leaves the machine
 /// exactly as it was; the publish itself is the canonical transaction, which
-/// rolls its own package back.
+/// rolls its own package back. When that rollback fails too, the outcome
+/// records that the package stayed.
 async fn install_one<P: QuickstartPrompter>(
     config: &mut Config,
     host: &mut PluginHost,
@@ -1147,12 +1154,25 @@ async fn install_one<P: QuickstartPrompter>(
     .await;
     drop(downloaded);
     if let Err(error) = published {
-        return Ok(failure(
+        let outcome = failure(
             prompter,
             &name,
             FailureStage::Publish,
             &format!("{error:#}"),
-        ));
+        );
+        // The transaction rolls its own package back. When that failed too,
+        // the package stays on disk although the host no longer lists it;
+        // the error says so in a typed layer, never only in its text.
+        return Ok(
+            if error
+                .downcast_ref::<crate::PublishRollbackFailed>()
+                .is_some()
+            {
+                PackageOutcome::RollbackFailed { name }
+            } else {
+                outcome
+            },
+        );
     }
     *config = staged;
     prompter.say(&indented(&qta(
@@ -1285,7 +1305,8 @@ async fn keep_installed<P: QuickstartPrompter>(
 
 /// Report a package that failed at `stage` and record it. Nothing durable
 /// happened for it: every stage before the publish writes nothing, and the
-/// publish rolls its own package back.
+/// publish rolls its own package back. A publish whose rollback failed too is
+/// the one exception, and its caller records it as such.
 fn failure<P: QuickstartPrompter>(
     prompter: &mut P,
     name: &str,
@@ -3702,6 +3723,37 @@ type = "string"
             .join("\n");
         assert!(activated.contains(&qta("cli-quickstart-plugins-apply-failed-activated", &[])));
         assert!(!activated.contains("plugin remove"), "{activated}");
+
+        // A failed publish whose rollback failed too left its package on
+        // disk: a change of this run's, named with the command that removes
+        // it, never "nothing changed".
+        let stranded = phase(
+            vec![
+                PackageOutcome::RollbackFailed {
+                    name: "stuck".to_string(),
+                },
+                PackageOutcome::Failed {
+                    name: "broken".to_string(),
+                    stage: FailureStage::Publish,
+                },
+            ],
+            false,
+        )
+        .apply_failed_headline(&config)
+        .expect("a package left installed is a change")
+        .join("\n");
+        assert!(
+            stranded.contains(&qta(
+                "cli-quickstart-plugins-apply-failed-state",
+                &[("names", "stuck")]
+            )),
+            "only the package left behind is named: {stranded}"
+        );
+        assert!(
+            stranded.contains(&zeroclaw_command(&config, "plugin remove stuck")),
+            "{stranded}"
+        );
+        assert!(!stranded.contains("plugin remove broken"), "{stranded}");
     }
 
     async fn serve_index(server: &MockServer, response: ResponseTemplate, hits: u64) {

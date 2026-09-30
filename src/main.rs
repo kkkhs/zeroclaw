@@ -4639,11 +4639,41 @@ async fn publish_and_seed_plugin(
             "the plugin package '{name}' was rolled back after its configuration \
              could not be seeded; re-run the install once the cause above is resolved"
         ))),
-        Err(rollback_err) => Err(seed_err.context(format!(
+        Err(rollback_err) => Err(seed_err.context(PublishRollbackFailed {
+            package: name,
+            rollback_error: rollback_err.to_string(),
+        })),
+    }
+}
+
+/// The error layer [`publish_and_seed_plugin`] adds when undoing its publish
+/// failed too: the package stays installed and has to be removed by hand.
+///
+/// A type rather than only text, so a caller that reports what a run changed
+/// can tell this failure from one that left nothing behind. The host drops
+/// the package from its loaded set before it deletes the directory, so after
+/// this failure the host no longer lists a package that is still on disk.
+/// The text is what `plugin install` prints.
+#[cfg(feature = "plugins-wasm")]
+#[derive(Debug)]
+struct PublishRollbackFailed {
+    package: String,
+    rollback_error: String,
+}
+
+#[cfg(feature = "plugins-wasm")]
+impl std::fmt::Display for PublishRollbackFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            package: name,
+            rollback_error,
+        } = self;
+        write!(
+            f,
             "the plugin package '{name}' could not be seeded and rolling it back \
-             ALSO failed ({rollback_err}); the package is still installed — remove \
+             ALSO failed ({rollback_error}); the package is still installed — remove \
              it with `zeroclaw plugin remove {name}` before retrying"
-        ))),
+        )
     }
 }
 
@@ -20024,6 +20054,31 @@ type = "string"
                 .iter()
                 .any(|e| e.name == instance_key),
             "the retry must seed the instance-key row"
+        );
+    }
+
+    /// A publish whose rollback failed too reads exactly as `plugin install`
+    /// always printed it, and a caller can still recognize it by type.
+    #[test]
+    #[cfg(feature = "plugins-wasm")]
+    fn a_failed_rollback_keeps_its_text_and_is_recognizable_by_type() {
+        let error = anyhow::Error::msg("seeding failed").context(PublishRollbackFailed {
+            package: "weather-tool".to_string(),
+            rollback_error: "permission denied".to_string(),
+        });
+        assert_eq!(
+            format!("{error:#}"),
+            "the plugin package 'weather-tool' could not be seeded and rolling it back ALSO \
+             failed (permission denied); the package is still installed — remove it with \
+             `zeroclaw plugin remove weather-tool` before retrying: seeding failed"
+        );
+        assert!(error.downcast_ref::<PublishRollbackFailed>().is_some());
+
+        let rolled_back = anyhow::Error::msg("seeding failed").context("rolled back");
+        assert!(
+            rolled_back
+                .downcast_ref::<PublishRollbackFailed>()
+                .is_none()
         );
     }
 

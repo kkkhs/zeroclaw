@@ -202,8 +202,9 @@ creates the entry, asking first when it would grant network destinations.
 If the agent step still fails after the plugin step changed something,
 Quickstart does not claim that nothing changed. It names the plugins that stay
 installed, configured, or activated, and prints the `zeroclaw plugin remove`
-command for each plugin that run installed. Running Quickstart again does not
-reinstall them.
+command for each plugin that run installed, including one whose failed install
+could not be undone and so stays in the plugins directory. Running Quickstart
+again does not reinstall them.
 
 The architecture roadmap
 ([FND-001](../foundations/fnd-001-intentional-architecture.md#d4-integrate-zeroclaw-onboard-with-the-plugin-system),

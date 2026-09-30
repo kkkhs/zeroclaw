@@ -724,6 +724,10 @@ pub(crate) enum PackageOutcome {
     Refused { name: String, reason: Refusal },
     /// A step failed before anything durable happened for it.
     Failed { name: String, stage: FailureStage },
+    /// Its publish-and-seed failed and undoing the publish failed too, so
+    /// the package stays in the plugins directory, possibly without its
+    /// config row, until it is removed by hand. A change this run made.
+    RollbackFailed { name: String },
 }
 
 impl PackageOutcome {
@@ -735,11 +739,16 @@ impl PackageOutcome {
             | Self::AlreadyInstalledSkipped { name }
             | Self::Skipped { name }
             | Self::Refused { name, .. }
-            | Self::Failed { name, .. } => name,
+            | Self::Failed { name, .. }
+            | Self::RollbackFailed { name } => name,
         }
     }
 
     /// Whether the package is installed after this run, whoever installed it.
+    ///
+    /// A package whose rollback failed is left out: it is on disk, but its
+    /// install failed, so it is reported only as a change to remove, and it
+    /// never brings up the activation question by itself.
     #[must_use]
     pub(crate) fn is_installed(&self) -> bool {
         matches!(
@@ -768,7 +777,16 @@ impl PackageOutcome {
                     seeded_row: true,
                     ..
                 }
+                | Self::RollbackFailed { .. }
         )
+    }
+
+    /// Whether this run put the package into the plugins directory, so
+    /// removing it undoes the run: it published it, or failed to undo its
+    /// publish.
+    #[must_use]
+    pub(crate) fn published_by_run(&self) -> bool {
+        matches!(self, Self::Installed { .. } | Self::RollbackFailed { .. })
     }
 
     /// Stable label for log events.
@@ -781,6 +799,7 @@ impl PackageOutcome {
             Self::Skipped { .. } => "skipped",
             Self::Refused { reason, .. } => reason.as_str(),
             Self::Failed { stage, .. } => stage.as_str(),
+            Self::RollbackFailed { .. } => "rollback_failed",
         }
     }
 }
@@ -1261,6 +1280,19 @@ mod tests {
         assert!(!skipped_row.changed_state());
         assert!(!failed.is_accepted());
         assert_eq!(skipped_row.kind(), "already_installed_skipped");
+
+        // A publish whose rollback failed left the package behind: a change
+        // of this run's, undone by removing it, though its install failed.
+        let stranded = PackageOutcome::RollbackFailed {
+            name: "f".to_string(),
+        };
+        assert!(stranded.changed_state() && stranded.published_by_run());
+        assert!(!stranded.is_installed() && !stranded.is_accepted());
+        assert_eq!(stranded.kind(), "rollback_failed");
+        assert!(installed.published_by_run());
+        for other in [&seeded, &untouched, &failed, &skipped_row] {
+            assert!(!other.published_by_run(), "{other:?}");
+        }
     }
 
     #[test]
