@@ -1242,7 +1242,7 @@ mod tests {
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 22] = [
+        let cases: [QuickstartPluginCase<'_>; 24] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1369,6 +1369,19 @@ mod tests {
                 "cli-quickstart-plugins-ready-missing-settings",
                 &[("name", "weather-tool"), ("keys", "api_key, units")],
                 &["weather-tool", "api_key, units"],
+            ),
+            // `config set` resolves only rows that exist, so an instance
+            // without the row it is owed gets the command that creates it,
+            // and a tool that owns no state is active without one.
+            (
+                "cli-quickstart-plugins-ready-no-row",
+                &[("name", "weather-tool"), ("command", create_later.as_str())],
+                &["weather-tool", create_later.as_str()],
+            ),
+            (
+                "cli-quickstart-plugins-ready-no-entry-needed",
+                &[("name", "weather-tool")],
+                &["weather-tool"],
             ),
             (
                 "cli-quickstart-plugins-apply-failed-state-activated",

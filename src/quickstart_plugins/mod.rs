@@ -537,7 +537,10 @@ impl CreatePhase {
 /// A verdict that holds the instance back is reported first. Whatever the
 /// verdict, an instance whose config row lacks a required setting is rejected
 /// on every call, so it is never reported as active: its line names the
-/// missing settings and gives the command that sets each one. When the row
+/// missing settings and gives the command that sets each one. An instance
+/// whose manifest owes it a row that does not exist is not reported active
+/// either, and gets no `config set` command, which resolves only rows that
+/// exist: its line gives the command that creates the row. When the row
 /// cannot be read, the status is reported unavailable rather than active.
 fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<String> {
     let verdict = zeroclaw_runtime::plugin_runtime::tool_instance_admission(config, host, name)
@@ -547,8 +550,24 @@ fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<Stri
     if !admitted {
         lines.push(indented(&readiness_line(name, &verdict)));
     }
-    match missing_settings(config, host, name, &verdict) {
-        Ok(Some((instance_key, missing))) if !missing.is_empty() => {
+    match instance_settings(config, host, name) {
+        Ok(InstanceSettings::NoRow { instance_key }) => {
+            // The same command a skipped row is created with: the row, with
+            // the destinations `plugin install` would seed into it.
+            let command = egress_create_command(
+                crate::egress_command_config_dir(config),
+                &instance_key,
+                &canonical_hosts(&crate::declared_egress_hosts(host, name)),
+            );
+            lines.push(indented(&qta(
+                "cli-quickstart-plugins-ready-no-row",
+                &[("name", &terminal_safe(name)), ("command", &command)],
+            )));
+        }
+        Ok(InstanceSettings::Row {
+            instance_key,
+            missing,
+        }) if !missing.is_empty() => {
             lines.push(indented(&qta(
                 "cli-quickstart-plugins-ready-missing-settings",
                 &[
@@ -565,6 +584,12 @@ fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<Stri
                 )))
             }));
         }
+        // The active line names the instance's config entry, which a tool
+        // that owns no state never gets.
+        Ok(InstanceSettings::NoRowNeeded) if admitted => lines.push(indented(&qta(
+            "cli-quickstart-plugins-ready-no-entry-needed",
+            &[("name", &terminal_safe(name))],
+        ))),
         Ok(_) if admitted => lines.push(indented(&readiness_line(name, &verdict))),
         Ok(_) => {}
         Err(error) => lines.push(indented(&readiness_line(name, &Err(error)))),
@@ -572,45 +597,55 @@ fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<Stri
     lines
 }
 
-/// The config row `name`'s tool instance reads its settings from, and the
-/// required settings that row leaves unset, from the manifest `host` admitted
-/// and the row as `config` holds it now. `None` when the package holds no tool
-/// instance with a row.
-///
-/// An admitted instance's row is the one its verdict names. For any other
-/// verdict the row is derived from the manifest as install seeds it, so an
+/// Where `name`'s tool instance reads its settings from, as the plugins
+/// directory and the config hold them now.
+enum InstanceSettings {
+    /// The package is not installed, or provides no tool.
+    NoInstance,
+    /// The manifest owns no settings and no network reach, so install seeds
+    /// no row for the instance and it needs none.
+    NoRowNeeded,
+    /// The manifest owes the instance a row, and the config holds none.
+    NoRow { instance_key: String },
+    /// The row exists; `missing` are the required settings it leaves unset.
+    Row {
+        instance_key: String,
+        missing: Vec<String>,
+    },
+}
+
+/// Read `name`'s tool instance settings from the manifest `host` admitted and
+/// the row `config` holds under the instance key install seeds, so an
 /// instance held back today still reports what it lacks.
 ///
 /// # Errors
 ///
 /// When more than one row holds the instance key, or the key cannot be
 /// derived from the manifest.
-fn missing_settings(
+fn instance_settings(
     config: &Config,
     host: &PluginHost,
     name: &str,
-    verdict: &anyhow::Result<ToolInstanceAdmission>,
-) -> anyhow::Result<Option<(String, Vec<String>)>> {
-    let Some(manifest) = host.manifest(name) else {
-        return Ok(None);
+) -> anyhow::Result<InstanceSettings> {
+    let Some(manifest) = host
+        .manifest(name)
+        .filter(|manifest| manifest.capabilities.contains(&PluginCapability::Tool))
+    else {
+        return Ok(InstanceSettings::NoInstance);
     };
-    let instance_key = match verdict {
-        Ok(ToolInstanceAdmission::Admitted { instance_key }) => instance_key.clone(),
-        _ => {
-            let tool_row = crate::manifest_config_entries(manifest)?
-                .into_iter()
-                .find_map(|(capability, key)| {
-                    (capability == PluginCapability::Tool).then_some(key)
-                });
-            let Some(instance_key) = tool_row else {
-                return Ok(None);
-            };
-            instance_key
-        }
+    let tool_row = crate::manifest_config_entries(manifest)?
+        .into_iter()
+        .find_map(|(capability, key)| (capability == PluginCapability::Tool).then_some(key));
+    let Some(instance_key) = tool_row else {
+        return Ok(InstanceSettings::NoRowNeeded);
     };
-    let row = config.plugins.entry_config(&instance_key)?;
-    let missing = missing_required_settings(manifest, row);
-    Ok(Some((instance_key, missing)))
+    Ok(match config.plugins.entry_config(&instance_key)? {
+        None => InstanceSettings::NoRow { instance_key },
+        Some(row) => InstanceSettings::Row {
+            missing: missing_required_settings(manifest, Some(row)),
+            instance_key,
+        },
+    })
 }
 
 fn readiness_line(name: &str, verdict: &anyhow::Result<ToolInstanceAdmission>) -> String {
@@ -1769,8 +1804,12 @@ hosts = ["api.example.com"]
     }
 
     fn fixture_instance_key() -> String {
-        let manifest: PluginManifest =
-            toml::from_str(FIXTURE_MANIFEST).expect("fixture manifest parses");
+        instance_key_of(FIXTURE_MANIFEST)
+    }
+
+    /// The config row key of the tool instance `manifest` describes.
+    fn instance_key_of(manifest: &str) -> String {
+        let manifest: PluginManifest = toml::from_str(manifest).expect("the manifest parses");
         PluginInstanceScope::for_package_binding(
             &manifest,
             PluginCapability::Tool,
@@ -2035,8 +2074,12 @@ hosts = ["api.example.com"]
     }
 
     fn verdict(config: &Config) -> ToolInstanceAdmission {
+        verdict_for(config, FIXTURE_NAME)
+    }
+
+    fn verdict_for(config: &Config, package: &str) -> ToolInstanceAdmission {
         let host = crate::plugin_host_with_configured_security(config).expect("host builds");
-        zeroclaw_runtime::plugin_runtime::tool_instance_admission(config, &host, FIXTURE_NAME)
+        zeroclaw_runtime::plugin_runtime::tool_instance_admission(config, &host, package)
             .expect("the activation plan builds")
     }
 
@@ -2457,18 +2500,25 @@ hosts = ["api.example.com"]
     /// config row, the state a Ctrl+C between the publish and the seeding of
     /// an earlier install leaves behind.
     fn install_without_a_row(workspace: &Workspace) {
-        let source = workspace.dir.path().join("source").join(FIXTURE_NAME);
+        install_with_manifest(workspace, FIXTURE_NAME, FIXTURE_MANIFEST);
+    }
+
+    /// Publish the in-tree tool component as package `name` under
+    /// `manifest`, whose `wasm_path` is `tool-fixture.wasm`, with no config
+    /// row.
+    fn install_with_manifest(workspace: &Workspace, name: &str, manifest: &str) {
+        let source = workspace.dir.path().join("source").join(name);
         std::fs::create_dir_all(&source).expect("package source directory");
         std::fs::copy(
             tool_component_fixture::wasm(),
             source.join("tool-fixture.wasm"),
         )
         .expect("copy the component");
-        std::fs::write(source.join("manifest.toml"), FIXTURE_MANIFEST).expect("write the manifest");
+        std::fs::write(source.join("manifest.toml"), manifest).expect("write the manifest");
         let mut host =
             crate::plugin_host_with_configured_security(&workspace.config).expect("plugin host");
         host.install(source.to_str().expect("UTF-8 temporary path"))
-            .expect("install the fixture");
+            .expect("install the package");
     }
 
     #[tokio::test]
@@ -2537,9 +2587,169 @@ hosts = ["api.example.com"]
                     output.contains("config patch -"),
                     "a skip names the command that creates the row later: {output}"
                 );
+                // The status reads the absent row: it gives the same command
+                // that creates it, and no `config set` command, which only
+                // resolves rows that exist.
+                let readiness = phase.readiness_lines(&workspace.config).join("\n");
+                let create = egress_create_command(
+                    crate::egress_command_config_dir(&workspace.config),
+                    &key,
+                    &[DECLARED_HOST.to_string()],
+                );
+                assert!(
+                    readiness.contains(&qta(
+                        "cli-quickstart-plugins-ready-no-row",
+                        &[("name", FIXTURE_NAME), ("command", &create)]
+                    )),
+                    "the status names the missing row and how to create it: {readiness}"
+                );
+                assert!(
+                    !readiness.contains("config set plugins.entries"),
+                    "no setting command for a row that does not exist: {readiness}"
+                );
             }
             server.verify().await;
         }
+    }
+
+    #[test]
+    fn a_tool_without_a_config_row_is_reported_by_what_its_manifest_needs() {
+        // A tool that requires no setting but requests network access: install
+        // owes it a row, where the operator's grant lives.
+        let networked = r#"name = "net-tool"
+version = "0.1.0"
+wasm_path = "tool-fixture.wasm"
+capabilities = ["tool"]
+permissions = ["http_client"]
+
+[egress]
+hosts = ["api.example.com"]
+"#;
+        // A tool with nothing to configure and no network access: install
+        // seeds it no row, and it needs none.
+        let stateless = r#"name = "pure-tool"
+version = "0.1.0"
+wasm_path = "tool-fixture.wasm"
+capabilities = ["tool"]
+"#;
+        let mut workspace = Workspace::new();
+        install_with_manifest(&workspace, "net-tool", networked);
+        install_with_manifest(&workspace, "pure-tool", stateless);
+        workspace.config.plugins.enabled = true;
+        workspace.config.plugins.auto_discover = true;
+        let phase = CreatePhase {
+            outcomes: vec![
+                PackageOutcome::Installed {
+                    name: "net-tool".to_string(),
+                },
+                PackageOutcome::Installed {
+                    name: "pure-tool".to_string(),
+                },
+            ],
+            activation_changed: false,
+        };
+
+        let readiness = phase.readiness_lines(&workspace.config);
+
+        let text = readiness.join("\n");
+        for (name, manifest) in [("net-tool", networked), ("pure-tool", stateless)] {
+            let key = instance_key_of(manifest);
+            assert_eq!(
+                verdict_for(&workspace.config, name),
+                ToolInstanceAdmission::Admitted {
+                    instance_key: key.clone()
+                }
+            );
+            assert!(
+                !text.contains(&qta(
+                    "cli-quickstart-plugins-ready",
+                    &[("name", name), ("key", &key)]
+                )),
+                "{name}: the active line names a config entry that does not exist: {text}"
+            );
+        }
+        let create = egress_create_command(
+            crate::egress_command_config_dir(&workspace.config),
+            &instance_key_of(networked),
+            &[DECLARED_HOST.to_string()],
+        );
+        assert!(
+            readiness.contains(&indented(&qta(
+                "cli-quickstart-plugins-ready-no-row",
+                &[("name", "net-tool"), ("command", &create)]
+            ))),
+            "a missing row owed to the instance gets the command that creates it: {text}"
+        );
+        assert!(
+            readiness.contains(&indented(&qta(
+                "cli-quickstart-plugins-ready-no-entry-needed",
+                &[("name", "pure-tool")]
+            ))),
+            "a tool with nothing to configure is active without a row: {text}"
+        );
+        assert!(!text.contains("config set"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_row_a_degraded_plugins_section_left_unseeded_gets_the_command_that_creates_it() {
+        let server = MockServer::start().await;
+        serve_valid_archive(&server, 1).await;
+        let mut workspace = Workspace::new();
+        // The `[plugins]` section on disk did not load, so the publish seeds
+        // no row for the instance.
+        workspace
+            .config
+            .degraded_sections
+            .push("plugins".to_string());
+        let selection = selection(fixture_entry(&server, Some(archive_digest())));
+        let mut answers = install_answers(GRANT);
+        answers.push(Answer::Confirm(Some(true)));
+        let mut prompter = ScriptedPrompter::new(answers);
+
+        let phase = run(&mut workspace, &selection, &mut prompter)
+            .await
+            .expect("the phase completes");
+
+        prompter.assert_done();
+        assert_eq!(
+            phase.outcomes,
+            vec![PackageOutcome::Installed {
+                name: FIXTURE_NAME.to_string(),
+            }]
+        );
+        let key = fixture_instance_key();
+        assert!(workspace.row(&key).is_none(), "no row was seeded");
+        assert_eq!(
+            verdict(&workspace.config),
+            ToolInstanceAdmission::Admitted {
+                instance_key: key.clone()
+            }
+        );
+        let readiness = phase.readiness_lines(&workspace.config).join("\n");
+        let create = egress_create_command(
+            crate::egress_command_config_dir(&workspace.config),
+            &key,
+            &[DECLARED_HOST.to_string()],
+        );
+        assert!(
+            readiness.contains(&qta(
+                "cli-quickstart-plugins-ready-no-row",
+                &[("name", FIXTURE_NAME), ("command", &create)]
+            )),
+            "{readiness}"
+        );
+        assert!(
+            !readiness.contains("config set plugins.entries"),
+            "no setting command for a row that does not exist: {readiness}"
+        );
+        assert!(
+            !readiness.contains(&qta(
+                "cli-quickstart-plugins-ready",
+                &[("name", FIXTURE_NAME), ("key", &key)]
+            )),
+            "an instance without its row is not reported active: {readiness}"
+        );
+        server.verify().await;
     }
 
     #[tokio::test]

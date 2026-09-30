@@ -168,7 +168,11 @@ it is not active, such as `plugins.enabled` or `plugins.auto_discover` being
 off or the `plugins.max_active_instances` limit being reached. A plugin you
 installed without its required settings is not usable until they are set, so
 its status names them, each with the `zeroclaw config set` command that asks
-for its value.
+for its value. A plugin whose config entry is missing, for example because you
+skipped creating it, is not reported active either: `zeroclaw config set` only
+changes entries that exist, so its status prints the command that creates the
+entry instead. A plugin with nothing to configure and no network access needs
+no config entry.
 
 Quickstart writes the config file and never signals a running daemon. A daemon
 that is already running keeps the configuration it loaded, so it uses the new
