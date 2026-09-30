@@ -564,9 +564,10 @@ impl CreatePhase {
 /// reason is then shown once, followed by the required settings the row
 /// lacks, each with its `config set` command when that command can write it.
 /// An instance whose manifest owes it a row that does not exist gets no
-/// `config set` command, which resolves only rows that exist: its line gives
-/// the command that creates the row. When the row cannot be read, the status
-/// is reported unavailable rather than active.
+/// setting command, since `config set` resolves only rows that exist: its line
+/// gives the command that creates the row with no grant, and a manifest that
+/// declares destinations adds the separate command that grants them. When the
+/// row cannot be read, the status is reported unavailable rather than active.
 fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<String> {
     let verdict = zeroclaw_runtime::plugin_runtime::tool_instance_admission(config, host, name)
         .map_err(anyhow::Error::from);
@@ -578,17 +579,25 @@ fn package_readiness(config: &Config, host: &PluginHost, name: &str) -> Vec<Stri
     let display_name = terminal_safe(name);
     match instance_settings(config, host, name) {
         Ok(InstanceSettings::NoRow { instance_key }) => {
-            // The same command a skipped row is created with: the row, with
-            // the destinations `plugin install` would seed into it.
-            let command = egress_create_command(
-                crate::egress_command_config_dir(config),
-                &instance_key,
-                &canonical_hosts(&crate::declared_egress_hosts(host, name)),
-            );
+            // The same commands a skipped row gets: one that creates the row
+            // with no grant, then, apart from it, the one that grants the
+            // declared destinations.
             lines.push(indented(&qta(
                 "cli-quickstart-plugins-ready-no-row",
-                &[("name", &display_name), ("command", &command)],
+                &[
+                    ("name", &display_name),
+                    ("command", &create_row_command(config, &instance_key)),
+                ],
             )));
+            lines.extend(
+                declared_grant_line(
+                    config,
+                    name,
+                    &instance_key,
+                    &crate::declared_egress_hosts(host, name),
+                )
+                .map(|line| indented(&line)),
+            );
         }
         Ok(InstanceSettings::Rejected {
             instance_key,
@@ -1225,7 +1234,9 @@ async fn install_one<P: QuickstartPrompter>(
 /// destinations it could reach, the operator gets the package summary and the
 /// same egress decision a fresh install gets, and a skip leaves the row
 /// absent, recorded as its own outcome so the activation question does not
-/// count the package as picked. Nothing is asked when the row already exists.
+/// count the package as picked. The skip prints the command that creates the
+/// row with no grant and, apart from it, the one that grants the declaration.
+/// Nothing is asked when the row already exists.
 async fn keep_installed<P: QuickstartPrompter>(
     config: &mut Config,
     host: &PluginHost,
@@ -1272,16 +1283,19 @@ async fn keep_installed<P: QuickstartPrompter>(
                 Some(decision) => decision,
                 None => {
                     // `config set` resolves only rows that exist, so the way
-                    // back is the command that creates this one.
-                    let command = egress_create_command(
-                        crate::egress_command_config_dir(config),
-                        &missing_key,
-                        &canonical_hosts(&declared),
-                    );
+                    // back is the command that creates this one. The operator
+                    // just declined the declared destinations, so that command
+                    // grants none of them; granting them is a separate command.
                     prompter.say(&indented(&qta(
                         "cli-quickstart-plugins-row-skipped",
-                        &[("name", &display_name), ("command", &command)],
+                        &[
+                            ("name", &display_name),
+                            ("command", &create_row_command(config, &missing_key)),
+                        ],
                     )));
+                    if let Some(line) = declared_grant_line(config, name, &missing_key, &declared) {
+                        prompter.say(&indented(&line));
+                    }
                     return Ok(PackageOutcome::AlreadyInstalledSkipped {
                         name: name.to_string(),
                     });
@@ -1634,6 +1648,47 @@ fn config_set_command(config: &Config, path: &str, value: &str) -> String {
     zeroclaw_command(config, &format!("config set {path} {value}"))
 }
 
+/// The command that creates `instance_key`'s missing config row, which no
+/// `config set` command can do. The row it creates grants no destination: a
+/// command this step prints never grants network reach on the operator's
+/// behalf, so reaching the declared destinations stays the separate step
+/// [`declared_grant_line`] offers.
+fn create_row_command(config: &Config, instance_key: &str) -> String {
+    egress_create_command(crate::egress_command_config_dir(config), instance_key, &[])
+}
+
+/// The optional line that follows [`create_row_command`]: the command that
+/// grants the destinations the manifest declares, which resolves once the row
+/// exists. `declared` is the declaration `plugin install` would seed, which
+/// counts only with `http_client` (see [`crate::declared_egress_hosts`]).
+/// `None` when it is empty, since there is nothing to grant.
+fn declared_grant_line(
+    config: &Config,
+    name: &str,
+    instance_key: &str,
+    declared: &[String],
+) -> Option<String> {
+    let hosts = canonical_hosts(declared);
+    if hosts.is_empty() {
+        return None;
+    }
+    Some(qta(
+        "cli-quickstart-plugins-grant-declared-later",
+        &[
+            ("name", &terminal_safe(name)),
+            ("count", &hosts.len().to_string()),
+            (
+                "command",
+                &egress_set_command(
+                    crate::egress_command_config_dir(config),
+                    instance_key,
+                    &hosts,
+                ),
+            ),
+        ],
+    ))
+}
+
 /// Enabled `[channels.plugin.<alias>]` declarations whose package is an
 /// installed channel plugin; turning `plugins.enabled` on brings each up once
 /// an enabled agent routes to it.
@@ -1902,6 +1957,31 @@ hosts = ["api.example.com"]
 
     fn fixture_instance_key() -> String {
         instance_key_of(FIXTURE_MANIFEST)
+    }
+
+    /// The command that creates the missing row `key`, built independently
+    /// of the step: the row it creates holds an empty grant.
+    fn empty_grant_create_command(config: &Config, key: &str) -> String {
+        let command = egress_create_command(crate::egress_command_config_dir(config), key, &[]);
+        assert!(
+            command.contains(r#""value":[]"#),
+            "the created row grants nothing: {command}"
+        );
+        command
+    }
+
+    /// The separate line that grants `name`'s one declared destination,
+    /// [`DECLARED_HOST`], on the row `key` once it exists.
+    fn declared_grant_line_for(config: &Config, name: &str, key: &str) -> String {
+        let command = egress_set_command(
+            crate::egress_command_config_dir(config),
+            key,
+            &[DECLARED_HOST.to_string()],
+        );
+        qta(
+            "cli-quickstart-plugins-grant-declared-later",
+            &[("name", name), ("count", "1"), ("command", &command)],
+        )
     }
 
     /// The config row key of the tool instance `manifest` describes.
@@ -2729,28 +2809,49 @@ hosts = ["api.example.com"]
                     "a skipped package is not reported as installed or configured \
                      by this run"
                 );
-                assert!(
-                    output.contains("config patch -"),
-                    "a skip names the command that creates the row later: {output}"
+                // The skip hands back the command that creates the row, which
+                // grants nothing the operator just declined, and, as its own
+                // line, the command that grants the declared destination.
+                let create = empty_grant_create_command(&workspace.config, &key);
+                let grant = declared_grant_line_for(&workspace.config, FIXTURE_NAME, &key);
+                let skipped_line = indented(&qta(
+                    "cli-quickstart-plugins-row-skipped",
+                    &[("name", FIXTURE_NAME), ("command", &create)],
+                ));
+                let skip_lines = &prompter.said;
+                let at = skip_lines
+                    .iter()
+                    .position(|line| *line == skipped_line)
+                    .unwrap_or_else(|| panic!("the skip line creates an empty grant: {output}"));
+                assert_eq!(
+                    skip_lines.get(at + 1),
+                    Some(&indented(&grant)),
+                    "the grant follows as a separate line: {output}"
                 );
-                // The status reads the absent row: it gives the same command
-                // that creates it, and no `config set` command, which only
+                // The status reads the absent row: it gives the same two
+                // commands, and no setting command, since `config set` only
                 // resolves rows that exist.
-                let readiness = phase.readiness_lines(&workspace.config).join("\n");
-                let create = egress_create_command(
-                    crate::egress_command_config_dir(&workspace.config),
-                    &key,
-                    &[DECLARED_HOST.to_string()],
+                let readiness = phase.readiness_lines(&workspace.config);
+                let no_row = indented(&qta(
+                    "cli-quickstart-plugins-ready-no-row",
+                    &[("name", FIXTURE_NAME), ("command", &create)],
+                ));
+                let at = readiness
+                    .iter()
+                    .position(|line| *line == no_row)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "the status names the missing row and how to create it: {readiness:?}"
+                        )
+                    });
+                assert_eq!(
+                    readiness.get(at + 1),
+                    Some(&indented(&grant)),
+                    "{readiness:?}"
                 );
+                let readiness = readiness.join("\n");
                 assert!(
-                    readiness.contains(&qta(
-                        "cli-quickstart-plugins-ready-no-row",
-                        &[("name", FIXTURE_NAME), ("command", &create)]
-                    )),
-                    "the status names the missing row and how to create it: {readiness}"
-                );
-                assert!(
-                    !readiness.contains("config set plugins.entries"),
+                    !readiness.contains(&format!("plugins.entries.{key}.config.")),
                     "no setting command for a row that does not exist: {readiness}"
                 );
             } else {
@@ -2776,6 +2877,24 @@ permissions = ["http_client"]
 [egress]
 hosts = ["api.example.com"]
 "#;
+        // Network access with no declared destination: the row is owed, and
+        // there is no declaration to grant.
+        let undeclared = r#"name = "open-tool"
+version = "0.1.0"
+wasm_path = "tool-fixture.wasm"
+capabilities = ["tool"]
+permissions = ["http_client"]
+"#;
+        // A declaration without `http_client`, the one transport it counts
+        // with: the row is owed, and nothing is granted from it.
+        let offline = r#"name = "offline-tool"
+version = "0.1.0"
+wasm_path = "tool-fixture.wasm"
+capabilities = ["tool"]
+
+[egress]
+hosts = ["api.example.com"]
+"#;
         // A tool with nothing to configure and no network access: install
         // seeds it no row, and it needs none.
         let stateless = r#"name = "pure-tool"
@@ -2783,27 +2902,32 @@ version = "0.1.0"
 wasm_path = "tool-fixture.wasm"
 capabilities = ["tool"]
 "#;
+        let packages = [
+            ("net-tool", networked),
+            ("open-tool", undeclared),
+            ("offline-tool", offline),
+            ("pure-tool", stateless),
+        ];
         let mut workspace = Workspace::new();
-        install_with_manifest(&workspace, "net-tool", networked);
-        install_with_manifest(&workspace, "pure-tool", stateless);
+        for (name, manifest) in packages {
+            install_with_manifest(&workspace, name, manifest);
+        }
         workspace.config.plugins.enabled = true;
         workspace.config.plugins.auto_discover = true;
         let phase = CreatePhase {
-            outcomes: vec![
-                PackageOutcome::Installed {
-                    name: "net-tool".to_string(),
-                },
-                PackageOutcome::Installed {
-                    name: "pure-tool".to_string(),
-                },
-            ],
+            outcomes: packages
+                .iter()
+                .map(|(name, _)| PackageOutcome::Installed {
+                    name: (*name).to_string(),
+                })
+                .collect(),
             activation_changed: false,
         };
 
         let readiness = phase.readiness_lines(&workspace.config);
 
         let text = readiness.join("\n");
-        for (name, manifest) in [("net-tool", networked), ("pure-tool", stateless)] {
+        for (name, manifest) in packages {
             let key = instance_key_of(manifest);
             assert_eq!(
                 verdict_for(&workspace.config, name),
@@ -2818,19 +2942,49 @@ capabilities = ["tool"]
                 )),
                 "{name}: the active line names a config entry that does not exist: {text}"
             );
+            assert!(
+                !text.contains(&format!("plugins.entries.{key}.config.")),
+                "{name}: no setting command for a row that does not exist: {text}"
+            );
         }
-        let create = egress_create_command(
-            crate::egress_command_config_dir(&workspace.config),
-            &instance_key_of(networked),
-            &[DECLARED_HOST.to_string()],
-        );
-        assert!(
-            readiness.contains(&indented(&qta(
+
+        // Each row the instance is owed comes with the command that creates
+        // it with an empty grant. Only the manifest that declares a
+        // destination `http_client` can reach adds the separate grant line.
+        for (name, manifest, granted) in [
+            ("net-tool", networked, true),
+            ("open-tool", undeclared, false),
+            ("offline-tool", offline, false),
+        ] {
+            let key = instance_key_of(manifest);
+            let no_row = indented(&qta(
                 "cli-quickstart-plugins-ready-no-row",
-                &[("name", "net-tool"), ("command", &create)]
-            ))),
-            "a missing row owed to the instance gets the command that creates it: {text}"
-        );
+                &[
+                    ("name", name),
+                    (
+                        "command",
+                        &empty_grant_create_command(&workspace.config, &key),
+                    ),
+                ],
+            ));
+            let at = readiness
+                .iter()
+                .position(|line| *line == no_row)
+                .unwrap_or_else(|| {
+                    panic!("{name}: a missing row owed to the instance gets the command that creates it: {text}")
+                });
+            let grant_line = indented(&declared_grant_line_for(&workspace.config, name, &key));
+            assert_eq!(
+                readiness.get(at + 1) == Some(&grant_line),
+                granted,
+                "{name}: the grant line: {text}"
+            );
+            assert_eq!(
+                text.contains(&format!("plugins.entries.{key}.egress_hosts")),
+                granted,
+                "{name}: a grant command only for a declaration `http_client` reaches: {text}"
+            );
+        }
         assert!(
             readiness.contains(&indented(&qta(
                 "cli-quickstart-plugins-ready-no-entry-needed",
@@ -2838,7 +2992,145 @@ capabilities = ["tool"]
             ))),
             "a tool with nothing to configure is active without a row: {text}"
         );
-        assert!(!text.contains("config set"), "{text}");
+    }
+
+    /// Run a printed command through `sh`, with `zeroclaw` replaced by a
+    /// function that records its arguments and its standard input, and return
+    /// both.
+    #[cfg(unix)]
+    fn run_printed_command(dir: &std::path::Path, command: &str) -> (Vec<String>, String) {
+        let args_file = dir.join("captured-args");
+        let stdin_file = dir.join("captured-stdin");
+        let script = format!(
+            "zeroclaw() {{ printf '%s\\n' \"$@\" > '{}'; cat > '{}'; }}\n{command}\n",
+            args_file.display(),
+            stdin_file.display()
+        );
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .stdin(std::process::Stdio::null())
+            .status()
+            .expect("run sh");
+        assert!(status.success(), "the printed command runs: {command}");
+        let args = std::fs::read_to_string(&args_file)
+            .expect("captured arguments")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let input = std::fs::read_to_string(&stdin_file).expect("captured input");
+        (args, input)
+    }
+
+    /// The two commands a missing row is handed back with, run as printed and
+    /// applied the way `config patch` and `config set` apply them: the first
+    /// creates the row with no destination, and only the second, run after
+    /// it, grants the declared one.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn the_printed_create_command_grants_nothing_and_the_grant_is_its_own_command() {
+        let mut workspace = Workspace::new();
+        install_without_a_row(&workspace);
+        let key = fixture_instance_key();
+        let dir = crate::egress_command_config_dir(&workspace.config)
+            .to_string_lossy()
+            .into_owned();
+        let egress_path = format!("plugins.entries.{key}.egress_hosts");
+        let hosts_on_disk = |workspace: &Workspace| -> Option<Vec<String>> {
+            row_on_disk(&workspace.config_on_disk(), &key).map(|row| {
+                row.get("egress_hosts")
+                    .and_then(toml::Value::as_array)
+                    .map(|hosts| {
+                        hosts
+                            .iter()
+                            .filter_map(toml::Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+        };
+
+        // The grant resolves only once the row exists.
+        let mut early = workspace.config.clone();
+        assert!(
+            early
+                .set_prop_persistent(&egress_path, DECLARED_HOST)
+                .is_err(),
+            "`config set` cannot write the grant of a row that does not exist"
+        );
+
+        let (args, input) = run_printed_command(
+            workspace.dir.path(),
+            &create_row_command(&workspace.config, &key),
+        );
+        assert_eq!(
+            args,
+            vec!["--config-dir", dir.as_str(), "config", "patch", "-"]
+        );
+        let ops: Vec<serde_json::Value> = serde_json::from_str(&input).expect("a JSON Patch");
+        assert_eq!(ops.len(), 1, "{input}");
+        assert_eq!(ops[0]["op"], "add", "{input}");
+        assert_eq!(ops[0]["value"], serde_json::json!([]), "{input}");
+        let path = ops[0]["path"]
+            .as_str()
+            .and_then(|pointer| pointer.strip_prefix('/'))
+            .expect("a JSON Pointer path")
+            .replace('/', ".");
+        assert_eq!(path, egress_path);
+        assert!(
+            !workspace.config.ensure_map_or_list_key_for_path(&path),
+            "the row key is creatable: {path}"
+        );
+        let value = crate::json_value_to_setprop_string(
+            &ops[0]["value"],
+            &workspace.config,
+            &path,
+            0,
+            false,
+        )
+        .expect("the empty list converts like any patched value");
+        workspace
+            .config
+            .set_prop_persistent(&path, &value)
+            .expect("the patch applies");
+        Box::pin(workspace.config.save_dirty())
+            .await
+            .expect("the patch saves");
+        assert_eq!(
+            hosts_on_disk(&workspace),
+            Some(Vec::new()),
+            "the created row exists and grants nothing"
+        );
+
+        let grant = egress_set_command(
+            crate::egress_command_config_dir(&workspace.config),
+            &key,
+            &[DECLARED_HOST.to_string()],
+        );
+        let (args, _) = run_printed_command(workspace.dir.path(), &grant);
+        assert_eq!(
+            args,
+            vec![
+                "--config-dir",
+                dir.as_str(),
+                "config",
+                "set",
+                egress_path.as_str(),
+                DECLARED_HOST
+            ]
+        );
+        workspace
+            .config
+            .set_prop_persistent(&args[4], &args[5])
+            .expect("the grant applies to the row that now exists");
+        Box::pin(workspace.config.save_dirty())
+            .await
+            .expect("the grant saves");
+        assert_eq!(
+            hosts_on_disk(&workspace),
+            Some(vec![DECLARED_HOST.to_string()])
+        );
     }
 
     #[tokio::test]
@@ -2877,11 +3169,7 @@ capabilities = ["tool"]
             }
         );
         let readiness = phase.readiness_lines(&workspace.config).join("\n");
-        let create = egress_create_command(
-            crate::egress_command_config_dir(&workspace.config),
-            &key,
-            &[DECLARED_HOST.to_string()],
-        );
+        let create = empty_grant_create_command(&workspace.config, &key);
         assert!(
             readiness.contains(&qta(
                 "cli-quickstart-plugins-ready-no-row",
@@ -2890,7 +3178,15 @@ capabilities = ["tool"]
             "{readiness}"
         );
         assert!(
-            !readiness.contains("config set plugins.entries"),
+            readiness.contains(&declared_grant_line_for(
+                &workspace.config,
+                FIXTURE_NAME,
+                &key
+            )),
+            "{readiness}"
+        );
+        assert!(
+            !readiness.contains(&format!("plugins.entries.{key}.config.")),
             "no setting command for a row that does not exist: {readiness}"
         );
         assert!(

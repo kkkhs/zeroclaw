@@ -1235,16 +1235,18 @@ mod tests {
         );
         let install_anyway =
             "zeroclaw --config-dir '/srv/zc' plugin install weather-tool --no-verify";
+        // A printed command that creates a missing row grants nothing: the
+        // declared destinations are granted by a separate command.
         let create_later = format!(
             "printf '%s\\n' '[{{\"op\":\"add\",\"path\":\"/plugins/entries/{key}/egress_hosts\",\
-             \"value\":[\"api.example.com\"]}}]' | zeroclaw --config-dir '/srv/zc' config patch -"
+             \"value\":[]}}]' | zeroclaw --config-dir '/srv/zc' config patch -"
         );
         let restart = "zeroclaw --config-dir '/srv/zc' service restart";
         /// One catalogue assertion: key, the args it is formatted with, and
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 27] = [
+        let cases: [QuickstartPluginCase<'_>; 28] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1298,8 +1300,9 @@ mod tests {
                 &["weather-tool", grant_later.as_str()],
             ),
             // An installed package missing its row gets the fresh-install
-            // decision; skipping it leaves no row, so only the command that
-            // creates one can grant it later.
+            // decision; skipping it leaves no row. The command that creates
+            // one later grants nothing, and the declared destinations get
+            // their own grant command, to run once the row exists.
             (
                 "cli-quickstart-plugins-missing-row",
                 &[("name", "weather-tool")],
@@ -1309,6 +1312,15 @@ mod tests {
                 "cli-quickstart-plugins-row-skipped",
                 &[("name", "weather-tool"), ("command", create_later.as_str())],
                 &["weather-tool", create_later.as_str()],
+            ),
+            (
+                "cli-quickstart-plugins-grant-declared-later",
+                &[
+                    ("name", "weather-tool"),
+                    ("count", "1"),
+                    ("command", grant.as_str()),
+                ],
+                &["weather-tool", grant.as_str()],
             ),
             // Settings Quickstart cannot prompt for, or could not save, point
             // at the command that sets them, verbatim.

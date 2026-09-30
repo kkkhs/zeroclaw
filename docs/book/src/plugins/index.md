@@ -470,7 +470,10 @@ still apply:
   without its row. The question starts on installing without network access,
   which leaves `egress_hosts` empty and prints the command that grants the
   destinations later. Skipping an already installed package leaves its row
-  absent and prints the command that creates it.
+  absent and prints the command that creates it with an empty grant, then, on
+  its own line, the command that grants the declared destinations. A command
+  Quickstart prints to create a row never grants network access; a grant is
+  always a command of its own.
 - **An existing row is never extended.** When the instance's
   `[[plugins.entries]]` row already exists, Quickstart leaves its
   `egress_hosts`, `egress_allow_private`, and settings exactly as they are. It

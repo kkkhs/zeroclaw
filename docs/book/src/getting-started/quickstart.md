@@ -146,8 +146,11 @@ missing. A new entry is a new grant, so for a plugin that requests
 `http_client` and declares destinations you first see what the plugin is and
 make the same choice as for a fresh install: grant the declared destinations,
 create the entry without network access, or skip, which leaves the entry absent
-and prints the command that creates it later. Any other missing entry is seeded
-as `zeroclaw plugin install` seeds it. An existing entry is never changed,
+and prints the command that creates it later. That command creates the entry
+without network access. The command that grants the declared destinations is
+printed on its own line, to run after it, so running a printed command never
+grants what you declined. Any other missing entry is seeded as
+`zeroclaw plugin install` seeds it. An existing entry is never changed,
 whether it belongs to an installed plugin or was left behind by an earlier
 install, so its egress grant and settings stay exactly as they are. Running
 Quickstart again with the same picks therefore downloads nothing and leaves
@@ -177,8 +180,11 @@ names the required settings that are missing, and prints the
 command cannot write is named without one. A plugin whose config entry is
 missing, for example because you skipped creating it, is not reported active
 either: `zeroclaw config set` only changes entries that exist, so its status
-prints the command that creates the entry instead. A plugin with nothing to
-configure and no network access needs no config entry.
+prints the command that creates the entry instead. That command grants no
+network access; for a plugin that requests `http_client` and declares
+destinations, a separate line gives the command that grants them once the
+entry exists. A plugin with nothing to configure and no network access needs
+no config entry.
 
 Quickstart writes the config file and never signals a running daemon. A daemon
 that is already running keeps the configuration it loaded, so it uses the new
