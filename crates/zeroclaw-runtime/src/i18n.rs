@@ -1237,7 +1237,7 @@ mod tests {
         /// the substrings the rendered value must contain.
         type QuickstartPluginCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 
-        let cases: [QuickstartPluginCase<'_>; 15] = [
+        let cases: [QuickstartPluginCase<'_>; 18] = [
             (
                 "cli-quickstart-plugins-choice-installed-other",
                 &[
@@ -1337,6 +1337,11 @@ mod tests {
                 &[("names", "weather-tool, notes-tool")],
                 &["weather-tool, notes-tool"],
             ),
+            // A failed agent step after the plugin step changed the machine
+            // reports what stays instead of claiming nothing on disk changed.
+            ("cli-quickstart-plugins-agent-not-created", &[], &[]),
+            ("cli-quickstart-plugins-remove-heading", &[], &[]),
+            ("cli-quickstart-plugins-fix-and-rerun", &[], &[]),
             ("cli-quickstart-plugins-restart-note", &[], &[]),
         ];
 

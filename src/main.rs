@@ -2984,25 +2984,25 @@ async fn run_quickstart_cli(
     };
 
     // Plugins picked in the Plugins row are installed, configured and offered
-    // for activation now, before the agent step. Each one went through the
-    // canonical publish-and-seed transaction by the time this returns, so an
-    // interruption never leaves a package half published.
+    // for activation now, before the agent step. The phase dry-runs the agent
+    // step first, so a submission it would refuse stops here with nothing on
+    // disk changed. Each plugin then goes through the canonical
+    // publish-and-seed transaction, so an interruption never leaves a package
+    // half published.
     #[cfg(feature = "plugins-wasm")]
     let plugin_phase = match Box::pin(crate::quickstart_plugins::run_create_phase(
         &mut cfg,
         &form.plugins,
+        &submission,
     ))
     .await
     {
         Ok(phase) => phase,
-        Err(halt) => {
-            halt.print_progress();
-            match halt.into_error() {
-                // Ctrl+C keeps the checklist's exit semantics.
-                None => std::process::exit(130),
-                Some(error) => return Err(error),
-            }
-        }
+        Err(halt) => match halt.report() {
+            // Ctrl+C keeps the checklist's exit semantics.
+            None => std::process::exit(130),
+            Some(error) => return Err(error),
+        },
     };
 
     match Box::pin(apply_with_surface(submission, &mut cfg, Surface::Cli)).await {
@@ -3036,7 +3036,37 @@ async fn run_quickstart_cli(
             Ok(())
         }
         Err(errs) => {
-            eprintln!();
+            // The plugin step ran first. Once it changed anything, the usual
+            // report that nothing on disk was changed would be false.
+            #[cfg(feature = "plugins-wasm")]
+            let headline = plugin_phase.apply_failed_headline(&cfg);
+            #[cfg(not(feature = "plugins-wasm"))]
+            let headline = None;
+            Err(report_agent_not_created(&errs, headline))
+        }
+    }
+}
+
+/// Print why the agent step refused a Quickstart submission and return the
+/// error Quickstart ends with.
+///
+/// The report opens with the lines that say nothing on disk was changed,
+/// which is true of a refused agent step on its own. `headline` replaces them
+/// for a run whose plugin step already installed, configured or activated
+/// plugins.
+#[cfg(feature = "agent-runtime")]
+fn report_agent_not_created(
+    errs: &[zeroclaw_runtime::quickstart::QuickstartError],
+    headline: Option<Vec<String>>,
+) -> anyhow::Error {
+    eprintln!();
+    match headline {
+        Some(lines) => {
+            for line in lines {
+                eprintln!("{line}");
+            }
+        }
+        None => {
             eprintln!(
                 "{}",
                 t(
@@ -3051,23 +3081,17 @@ async fn run_quickstart_cli(
                     "Your existing config is untouched. Fix the following and run quickstart again:",
                 )
             );
-            eprintln!();
-            for e in &errs {
-                eprintln!("  • {}: {}", quickstart_step_label(e.step), e.message);
-            }
-            eprintln!();
-            // Plugins run before the agent step, so what they changed stays.
-            #[cfg(feature = "plugins-wasm")]
-            plugin_phase.print_apply_failed_state();
-            anyhow::bail!(
-                "{}",
-                qta(
-                    "cli-quickstart-could-not-finish",
-                    &[("count", &errs.len().to_string())],
-                )
-            )
         }
     }
+    eprintln!();
+    for e in errs {
+        eprintln!("  • {}: {}", quickstart_step_label(e.step), e.message);
+    }
+    eprintln!();
+    anyhow::Error::msg(qta(
+        "cli-quickstart-could-not-finish",
+        &[("count", &errs.len().to_string())],
+    ))
 }
 
 #[cfg(feature = "agent-runtime")]

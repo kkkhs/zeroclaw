@@ -2,13 +2,15 @@
 //! registry, installed and configured when the agent is created, then
 //! activated with the operator's consent.
 //!
-//! Picking downloads and writes nothing. On Create each selected package goes
-//! through the pipeline `zeroclaw plugin install` uses (registry download,
-//! admission, the load check, then the one publish-and-seed transaction), with
-//! three differences an unattended install does not have: the registry entry
-//! must carry an archive digest, the operator decides whether the destinations
-//! the manifest declares are granted, and the instance's own settings are
-//! prompted for and validated before anything is written.
+//! Picking downloads and writes nothing. On Create the agent step is dry-run
+//! first, so a submission it would refuse stops Create before any plugin is
+//! touched. Then each selected package goes through the pipeline
+//! `zeroclaw plugin install` uses (registry download, admission, the load
+//! check, then the one publish-and-seed transaction), with three differences
+//! an unattended install does not have: the registry entry must carry an
+//! archive digest, the operator decides whether the destinations the manifest
+//! declares are granted, and the instance's own settings are prompted for and
+//! validated before anything is written.
 //!
 //! Nothing is stored beyond what those steps already own: the plugins
 //! directory, the `[[plugins.entries]]` row, and the two activation flags. The
@@ -21,8 +23,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use zeroclaw::plugins::host::PluginHost;
 use zeroclaw::plugins::instance::PluginInstanceScope;
 use zeroclaw::plugins::{PluginCapability, PluginManifest, PluginPermission};
+use zeroclaw_config::presets::BuilderSubmission;
 use zeroclaw_runtime::plugin_runtime::ToolInstanceAdmission;
-use zeroclaw_runtime::quickstart::FieldDescriptor;
+use zeroclaw_runtime::quickstart::{FieldDescriptor, QuickstartError, Surface};
 
 use crate::config::schema::Config;
 use crate::plugin_registry::{RegistryClient, RegistryTimeouts};
@@ -372,6 +375,9 @@ pub(crate) struct CreatePhase {
 /// Why the plugin phase stopped before the agent step.
 #[derive(Debug)]
 pub(crate) enum PhaseHalt {
+    /// The agent step would refuse the submission. It is dry-run before any
+    /// plugin is touched, so nothing on disk changed.
+    AgentRejected(Vec<QuickstartError>),
     /// Ctrl+C at a prompt.
     Interrupted { outcomes: Vec<PackageOutcome> },
     /// A prompt failed for any other reason.
@@ -389,34 +395,36 @@ impl PhaseHalt {
         }
     }
 
-    fn outcomes(&self) -> &[PackageOutcome] {
+    /// Print why Create stopped and return the error Quickstart ends with, or
+    /// `None` for Ctrl+C, which exits with status 130 like the checklist.
+    pub(crate) fn report(self) -> Option<anyhow::Error> {
         match self {
-            Self::Interrupted { outcomes } | Self::Failed { outcomes, .. } => outcomes,
+            // Nothing was touched, so the agent step's own report is true.
+            Self::AgentRejected(errors) => Some(crate::report_agent_not_created(&errors, None)),
+            Self::Interrupted { outcomes } => {
+                print_progress(&outcomes);
+                None
+            }
+            Self::Failed { outcomes, error } => {
+                print_progress(&outcomes);
+                Some(error)
+            }
         }
     }
+}
 
-    /// Say what this run installed or configured before it stopped. Every
-    /// package it names went through the whole publish-and-seed transaction;
-    /// none is half published.
-    pub(crate) fn print_progress(&self) {
-        let names = changed_names(self.outcomes());
-        if names.is_empty() {
-            eprintln!("{}", qta("cli-quickstart-plugins-stopped-none", &[]));
-        } else {
-            eprintln!(
-                "{}",
-                qta("cli-quickstart-plugins-stopped", &[("names", &names)])
-            );
-        }
-    }
-
-    /// The error to return, or `None` for Ctrl+C, which exits with status 130
-    /// like the checklist.
-    pub(crate) fn into_error(self) -> Option<anyhow::Error> {
-        match self {
-            Self::Interrupted { .. } => None,
-            Self::Failed { error, .. } => Some(error),
-        }
+/// Say what this run installed or configured before it stopped. Every package
+/// it names went through the whole publish-and-seed transaction; none is half
+/// published.
+fn print_progress(outcomes: &[PackageOutcome]) {
+    let names = changed_names(outcomes);
+    if names.is_empty() {
+        eprintln!("{}", qta("cli-quickstart-plugins-stopped-none", &[]));
+    } else {
+        eprintln!(
+            "{}",
+            qta("cli-quickstart-plugins-stopped", &[("names", &names)])
+        );
     }
 }
 
@@ -471,13 +479,16 @@ impl CreatePhase {
             .collect()
     }
 
-    /// After the agent step failed: the one line that keeps the failure
-    /// report accurate, since this run already installed or configured
-    /// plugins before the agent step.
-    pub(crate) fn print_apply_failed_state(&self) {
+    /// After the agent step failed: the lines that open its failure report
+    /// when this run already changed the machine, in place of the ones that
+    /// say nothing on disk was changed. They say what stays in place and give
+    /// the command that removes each package this run installed. `None` when
+    /// this run installed, configured and activated nothing, so the usual
+    /// report is still true.
+    pub(crate) fn apply_failed_headline(&self, config: &Config) -> Option<Vec<String>> {
         let names = changed_names(&self.outcomes);
-        let line = match (names.is_empty(), self.activation_changed) {
-            (true, false) => return,
+        let state = match (names.is_empty(), self.activation_changed) {
+            (true, false) => return None,
             (false, false) => qta(
                 "cli-quickstart-plugins-apply-failed-state",
                 &[("names", &names)],
@@ -488,7 +499,27 @@ impl CreatePhase {
             ),
             (true, true) => qta("cli-quickstart-plugins-apply-failed-activated", &[]),
         };
-        eprintln!("{line}");
+        let mut lines = vec![qta("cli-quickstart-plugins-agent-not-created", &[]), state];
+        // Only a package this run published gets a removal command. One that
+        // was installed before this run stays, whatever happened to its row.
+        let published: Vec<&str> = self
+            .outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, PackageOutcome::Installed { .. }))
+            .map(PackageOutcome::name)
+            .collect();
+        if !published.is_empty() {
+            lines.push(qta("cli-quickstart-plugins-remove-heading", &[]));
+            // A package name is lowercase letters, digits, `.`, `-` and `_`,
+            // which every supported shell passes as written.
+            lines.extend(
+                published.iter().map(|name| {
+                    indented(&zeroclaw_command(config, &format!("plugin remove {name}")))
+                }),
+            );
+        }
+        lines.push(qta("cli-quickstart-plugins-fix-and-rerun", &[]));
+        Some(lines)
     }
 }
 
@@ -555,12 +586,14 @@ fn readiness_line(name: &str, verdict: &anyhow::Result<ToolInstanceAdmission>) -
 ///
 /// # Errors
 ///
-/// A [`PhaseHalt`] when a prompt is interrupted or fails. Every package the
-/// halt reports as installed went through the whole publish-and-seed
-/// transaction; the rest of the selection was not touched.
+/// A [`PhaseHalt`] when the agent step would refuse `submission`, which is
+/// checked before any plugin is touched, or when a prompt is interrupted or
+/// fails. Every package the halt reports as installed went through the whole
+/// publish-and-seed transaction; the rest of the selection was not touched.
 pub(crate) async fn run_create_phase(
     config: &mut Config,
     row: &PluginsRow,
+    submission: &BuilderSubmission,
 ) -> Result<CreatePhase, PhaseHalt> {
     if row.selected.is_empty() {
         return Ok(CreatePhase::default());
@@ -570,13 +603,32 @@ pub(crate) async fn run_create_phase(
             outcomes: Vec::new(),
             error,
         })?;
-    Box::pin(install_and_activate(
+    Box::pin(create_phase_with(
         config,
         &row.selected,
+        submission,
         &registry,
         &mut TerminalPrompter,
     ))
     .await
+}
+
+/// The Create-time phase for a non-empty selection: the agent step's dry run,
+/// then the plugins.
+///
+/// The agent step runs after the plugins, which change the machine. A
+/// submission it would refuse is therefore refused here, while its report
+/// that nothing on disk was changed is still true.
+async fn create_phase_with<P: QuickstartPrompter>(
+    config: &mut Config,
+    selection: &[PluginChoice],
+    submission: &BuilderSubmission,
+    registry: &RegistryClient,
+    prompter: &mut P,
+) -> Result<CreatePhase, PhaseHalt> {
+    zeroclaw_runtime::quickstart::validate_only_with_surface(submission, config, Surface::Cli)
+        .map_err(PhaseHalt::AgentRejected)?;
+    Box::pin(install_and_activate(config, selection, registry, prompter)).await
 }
 
 /// The run-scoped attributes every event of one plugin phase carries: a run id
@@ -1285,17 +1337,22 @@ async fn save_settings<P: QuickstartPrompter>(
     }
 }
 
-/// `zeroclaw --config-dir '<dir>' config set <path> <value>`, addressed to the
-/// configuration this run loaded, as the grant ceremony addresses its
+/// `zeroclaw --config-dir '<dir>' <args>`: an operator command addressed to
+/// the configuration this run loaded, as the grant ceremony addresses its
 /// commands.
-fn config_set_command(config: &Config, path: &str, value: &str) -> String {
+fn zeroclaw_command(config: &Config, args: &str) -> String {
     let config_dir = crate::egress_command_config_dir(config);
     let dir = config_dir.to_string_lossy();
     let (dialect, marker) = ShellDialect::host().command_form(&[&dir]);
     format!(
-        "{marker}{} config set {path} {value}",
+        "{marker}{} {args}",
         zeroclaw_invocation_for(dialect, config_dir)
     )
+}
+
+/// `zeroclaw --config-dir '<dir>' config set <path> <value>`.
+fn config_set_command(config: &Config, path: &str, value: &str) -> String {
+    zeroclaw_command(config, &format!("config set {path} {value}"))
 }
 
 /// Enabled `[channels.plugin.<alias>]` declarations whose package is an
@@ -1442,6 +1499,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use zeroclaw::plugins::catalog::package_catalog;
     use zeroclaw::plugins::registry::{PluginRegistryEntry, PluginRegistryIndex};
+    use zeroclaw_runtime::quickstart::QuickstartStep;
 
     const FIXTURE_NAME: &str = "tool-fixture";
     const FIXTURE_VERSION: &str = "0.1.0";
@@ -1834,13 +1892,44 @@ hosts = ["api.example.com"]
         prompter: &mut ScriptedPrompter,
     ) -> Result<CreatePhase, PhaseHalt> {
         let registry = RegistryClient::new(timeouts).expect("registry client");
-        Box::pin(install_and_activate(
+        // Every run starts with the agent step's dry run, as Create does, for
+        // a submission the agent step accepts.
+        Box::pin(create_phase_with(
             &mut workspace.config,
             selection,
+            &submission("bot"),
             &registry,
             prompter,
         ))
         .await
+    }
+
+    /// A checklist submission for an agent named `agent`, with a fresh
+    /// provider, the built-in presets and SQLite memory. The agent step
+    /// accepts it on a fresh workspace unless `agent` is empty.
+    fn submission(agent: &str) -> BuilderSubmission {
+        use zeroclaw_config::presets::{
+            AgentIdentity, MemoryChoice, ModelProviderChoice, SelectorChoice,
+        };
+        BuilderSubmission {
+            model_provider: SelectorChoice::Fresh(ModelProviderChoice {
+                provider_type: "anthropic".to_string(),
+                alias: "anthropic".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                fields: HashMap::from([("api_key".to_string(), "sk-test".to_string())]),
+            }),
+            risk_profile: SelectorChoice::Fresh("balanced".to_string()),
+            runtime_profile: SelectorChoice::Fresh("balanced".to_string()),
+            memory: SelectorChoice::Fresh(MemoryChoice::Sqlite),
+            channels: Vec::new(),
+            peer_groups: Vec::new(),
+            agent: AgentIdentity {
+                name: agent.to_string(),
+                system_prompt: "You are helpful.".to_string(),
+                personality_file: None,
+                personality_files: Vec::new(),
+            },
+        }
     }
 
     fn verdict(config: &Config) -> ToolInstanceAdmission {
@@ -2382,11 +2471,157 @@ label = "enc2:YWxzby1ub3QtcmVhbA"
             !workspace.config.plugins.enabled,
             "activation was never answered"
         );
+        assert!(halt.report().is_none(), "Ctrl+C exits rather than erring");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_submission_the_agent_step_refuses_stops_create_before_any_plugin_is_touched() {
+        let server = MockServer::start().await;
+        serve_valid_archive(&server, 0).await;
+        let mut workspace = Workspace::new();
+        let before = workspace.config_bytes();
+        let selection = selection(fixture_entry(&server, Some(archive_digest())));
+        let registry = RegistryClient::new(RegistryTimeouts::default()).expect("registry client");
+        let mut prompter = ScriptedPrompter::new([]);
+
+        let halt = Box::pin(create_phase_with(
+            &mut workspace.config,
+            &selection,
+            &submission(""),
+            &registry,
+            &mut prompter,
+        ))
+        .await
+        .expect_err("a submission the agent step refuses stops Create");
+
+        let PhaseHalt::AgentRejected(errors) = &halt else {
+            panic!("expected the agent step's refusal, got {halt:?}");
+        };
         assert!(
-            halt.into_error().is_none(),
-            "Ctrl+C exits rather than erring"
+            errors
+                .iter()
+                .any(|error| error.step == QuickstartStep::Agent),
+            "the refusal is the agent step's own: {errors:?}"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("request recording is on")
+                .is_empty(),
+            "no archive was requested"
+        );
+        assert!(
+            !workspace.plugins_dir().exists(),
+            "not even the plugins directory was created"
+        );
+        assert_eq!(workspace.config_bytes(), before);
+        assert!(
+            prompter.said.is_empty() && prompter.choice_lists.is_empty(),
+            "nothing was printed or asked: {:?}",
+            prompter.said
         );
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_agent_step_after_an_install_never_says_nothing_changed() {
+        let server = MockServer::start().await;
+        serve_valid_archive(&server, 1).await;
+        let mut workspace = Workspace::new();
+        let selection = selection(fixture_entry(&server, Some(archive_digest())));
+        let mut answers = install_answers(GRANT);
+        answers.push(Answer::Confirm(Some(true)));
+        let mut prompter = ScriptedPrompter::new(answers);
+
+        let phase = run(&mut workspace, &selection, &mut prompter)
+            .await
+            .expect("the phase completes");
+        prompter.assert_done();
+
+        // The agent step fails after this point: its report opens with these
+        // lines instead of the ones that say nothing on disk was changed.
+        let headline = phase
+            .apply_failed_headline(&workspace.config)
+            .expect("this run installed a plugin")
+            .join("\n");
+        for false_claim in [
+            qta("cli-agent-not-created", &[]),
+            qta("cli-quickstart-fix-and-rerun", &[]),
+        ] {
+            assert!(!headline.contains(&false_claim), "{headline}");
+        }
+        for line in [
+            qta("cli-quickstart-plugins-agent-not-created", &[]),
+            qta(
+                "cli-quickstart-plugins-apply-failed-state-activated",
+                &[("names", FIXTURE_NAME)],
+            ),
+            qta("cli-quickstart-plugins-fix-and-rerun", &[]),
+        ] {
+            assert!(headline.contains(&line), "{line:?} missing from {headline}");
+        }
+        assert!(
+            headline.contains("--config-dir") && headline.contains("plugin remove tool-fixture"),
+            "the package this run installed comes with its removal command: {headline}"
+        );
+        server.verify().await;
+    }
+
+    #[test]
+    fn the_failure_headline_follows_what_the_run_changed() {
+        let config = Config::default();
+        let phase = |outcomes: Vec<PackageOutcome>, activation_changed: bool| CreatePhase {
+            outcomes,
+            activation_changed,
+        };
+        let kept = |seeded_row: bool| PackageOutcome::AlreadyInstalled {
+            name: "kept".to_string(),
+            seeded_row,
+        };
+
+        // Nothing changed, so "nothing on disk was changed" stays true.
+        assert_eq!(
+            phase(Vec::new(), false).apply_failed_headline(&config),
+            None
+        );
+        assert_eq!(
+            phase(
+                vec![
+                    kept(false),
+                    PackageOutcome::Skipped {
+                        name: "skipped".to_string()
+                    },
+                    PackageOutcome::Failed {
+                        name: "broken".to_string(),
+                        stage: FailureStage::Download,
+                    },
+                ],
+                false,
+            )
+            .apply_failed_headline(&config),
+            None
+        );
+
+        // A seeded row is a change, but the package was installed before:
+        // there is nothing of this run's to remove.
+        let seeded = phase(vec![kept(true)], false)
+            .apply_failed_headline(&config)
+            .expect("seeding a row changed the config")
+            .join("\n");
+        assert!(seeded.contains(&qta(
+            "cli-quickstart-plugins-apply-failed-state",
+            &[("names", "kept")]
+        )));
+        assert!(!seeded.contains("plugin remove"), "{seeded}");
+
+        let activated = phase(vec![kept(false)], true)
+            .apply_failed_headline(&config)
+            .expect("turning activation on changed the config")
+            .join("\n");
+        assert!(activated.contains(&qta("cli-quickstart-plugins-apply-failed-activated", &[])));
+        assert!(!activated.contains("plugin remove"), "{activated}");
     }
 
     async fn serve_index(server: &MockServer, response: ResponseTemplate, hits: u64) {
