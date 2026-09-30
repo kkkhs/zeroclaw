@@ -3705,17 +3705,9 @@ fn plugin_host_with_configured_security(
 fn manifest_config_entries(
     manifest: &zeroclaw::plugins::PluginManifest,
 ) -> Result<Vec<(zeroclaw::plugins::PluginCapability, String)>> {
-    use zeroclaw::plugins::PluginPermission;
-    let declares_network = manifest.permissions.iter().any(|p| {
-        matches!(
-            p,
-            PluginPermission::HttpClient
-                | PluginPermission::WebSocketClient
-                | PluginPermission::SocketClient
-        )
-    });
-    let owns_state =
-        manifest.config_schema.is_some() || !manifest.egress.hosts.is_empty() || declares_network;
+    let owns_state = manifest.config_schema.is_some()
+        || !manifest.egress.hosts.is_empty()
+        || manifest_requests_network(manifest);
     if !owns_state
         || !manifest
             .capabilities
@@ -3738,6 +3730,23 @@ fn manifest_config_entries(
         zeroclaw::plugins::PluginCapability::Tool,
         scope.id().config_entry_key()?,
     )])
+}
+
+/// Whether `manifest` requests a network transport whose reach the operator
+/// grants on the instance's row: `http_client`, `websocket_client` or
+/// `socket_client`. Such an instance is owed a row even when it declares no
+/// destination; see [`manifest_config_entries`].
+#[cfg(feature = "plugins-wasm")]
+fn manifest_requests_network(manifest: &zeroclaw::plugins::PluginManifest) -> bool {
+    use zeroclaw::plugins::PluginPermission;
+    manifest.permissions.iter().any(|p| {
+        matches!(
+            p,
+            PluginPermission::HttpClient
+                | PluginPermission::WebSocketClient
+                | PluginPermission::SocketClient
+        )
+    })
 }
 
 #[cfg(feature = "plugins-wasm")]
@@ -3773,12 +3782,22 @@ fn declared_egress_hosts(
     plugin_name: &str,
 ) -> Vec<String> {
     host.manifest(plugin_name)
-        .filter(|m| {
-            m.permissions
-                .contains(&zeroclaw::plugins::PluginPermission::HttpClient)
-        })
-        .map(|m| m.egress.hosts.clone())
+        .map(declared_egress_for_manifest)
         .unwrap_or_default()
+}
+
+/// [`declared_egress_hosts`] for a manifest already in hand: its `[egress]`
+/// hosts when it requests `http_client`, and nothing otherwise.
+#[cfg(feature = "plugins-wasm")]
+fn declared_egress_for_manifest(manifest: &zeroclaw::plugins::PluginManifest) -> Vec<String> {
+    if manifest
+        .permissions
+        .contains(&zeroclaw::plugins::PluginPermission::HttpClient)
+    {
+        manifest.egress.hosts.clone()
+    } else {
+        Vec::new()
+    }
 }
 
 /// Print the destinations a freshly seeded instance row was granted, one line

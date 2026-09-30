@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use zeroclaw::plugins::host::PluginHost;
 use zeroclaw::plugins::instance::PluginInstanceScope;
-use zeroclaw::plugins::{PluginCapability, PluginManifest, PluginPermission};
+use zeroclaw::plugins::{PluginCapability, PluginManifest};
 use zeroclaw_config::presets::BuilderSubmission;
 use zeroclaw_runtime::plugin_runtime::ToolInstanceAdmission;
 use zeroclaw_runtime::quickstart::{FieldDescriptor, QuickstartError, Surface};
@@ -1106,8 +1106,8 @@ async fn install_one<P: QuickstartPrompter>(
             .await;
         }
         if !row_exists
-            && requests_network(&manifest)
-            && crate::declared_egress_hosts(host, &name).is_empty()
+            && crate::manifest_requests_network(&manifest)
+            && crate::declared_egress_for_manifest(&manifest).is_empty()
         {
             let command = egress_set_command(
                 crate::egress_command_config_dir(config),
@@ -1294,24 +1294,12 @@ fn print_package_summary<P: QuickstartPrompter>(manifest: &PluginManifest, promp
     )));
 }
 
-fn requests_network(manifest: &PluginManifest) -> bool {
-    manifest.permissions.iter().any(|permission| {
-        matches!(
-            permission,
-            PluginPermission::HttpClient
-                | PluginPermission::WebSocketClient
-                | PluginPermission::SocketClient
-        )
-    })
-}
-
 /// Whether a row created for `manifest` grants anything the operator must
-/// decide on: only a manifest with `http_client` and a declaration. Without
-/// the transport nothing is seeded anyway, and without a declaration there is
-/// nothing to grant.
+/// decide on: only when the declaration `plugin install` would seed into it
+/// is not empty. That rule, `http_client` and a declaration, is the root's
+/// [`crate::declared_egress_for_manifest`]; this does not restate it.
 fn asks_for_egress(manifest: &PluginManifest) -> bool {
-    manifest.permissions.contains(&PluginPermission::HttpClient)
-        && !canonical_hosts(&manifest.egress.hosts).is_empty()
+    !canonical_hosts(&crate::declared_egress_for_manifest(manifest)).is_empty()
 }
 
 /// Ask whether the destinations the manifest declares are granted, when
