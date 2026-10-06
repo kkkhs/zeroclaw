@@ -1507,6 +1507,8 @@ mod tests {
                 &[("name", NAME), ("command", FROM_REGISTRY), ("local", LOCAL)],
                 &[NAME, FROM_REGISTRY, LOCAL],
             ),
+            ("cli-plugin-about", &[], &["WASM"]),
+            ("cli-plugin-update-about", &[], &[]),
             ("cli-plugin-update-usage-from", &[], &["--from"]),
             ("cli-plugin-update-usage-allow", &[], &["--allow"]),
             (
