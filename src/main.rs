@@ -5035,9 +5035,10 @@ fn plugin_displaced_note(
 ) -> String {
     let (command, local) =
         plugin_displaced_commands(egress_command_config_dir(config), name, registry);
+    let name = crate::plugins::update::printable(name);
     ta(
         "cli-plugin-list-displaced",
-        &[("name", name), ("command", &command), ("local", &local)],
+        &[("name", &name), ("command", &command), ("local", &local)],
         format!(
             "Note: an interrupted update left '{name}' displaced, so it is not loaded. Run `{command}` to put it back and update it from the registry, or `{local}` to put it back and update it from a package directory instead."
         ),

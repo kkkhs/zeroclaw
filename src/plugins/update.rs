@@ -112,26 +112,53 @@ pub fn malformed_allow_item(allowed: &[String]) -> Option<&str> {
     })
 }
 
-/// `text` with every control character and every bidirectional formatting
-/// character written as an escape, for printing publisher-controlled text to
-/// a terminal: an escape sequence or a reordering mark in a version, a
-/// `provides` id or a schema location cannot rewrite or rearrange what the
-/// operator reads where they decide what to accept. Other text is unchanged.
+/// `text` with every control, format, line separator and paragraph separator
+/// character (Unicode categories Cc, Cf, Zl and Zp) written as an escape, for
+/// printing publisher-controlled text to a terminal: an escape sequence, a
+/// reordering mark or an invisible character in a version, a `provides` id or
+/// a schema location cannot rewrite, rearrange or disguise what the operator
+/// reads where they decide what to accept. Other text is unchanged.
 #[must_use]
 pub fn printable(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        let bidi = matches!(
-            c,
-            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-        );
-        if c.is_control() || bidi {
+        if c.is_control() || is_format_or_separator(c) {
             out.extend(c.escape_unicode());
         } else {
             out.push(c);
         }
     }
     out
+}
+
+/// Whether `c` is in Unicode category Cf (format), Zl (line separator) or Zp
+/// (paragraph separator). The standard library exposes no general category,
+/// so the Cf ranges are listed here, as of Unicode 16.
+fn is_format_or_separator(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00ad}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
 }
 
 /// Whether `candidate` is an older version than `installed`, when both are
@@ -490,6 +517,18 @@ mod tests {
         assert_eq!(printable("tele\u{1b}[2Kgram"), "tele\\u{1b}[2Kgram");
         assert_eq!(printable("a\nb"), "a\\u{a}b");
         assert_eq!(printable("x\u{202e}y\u{2066}z"), "x\\u{202e}y\\u{2066}z");
+    }
+
+    /// Line and paragraph separators break a line as surely as a newline, and
+    /// invisible format characters make two different strings look the same.
+    #[test]
+    fn separators_and_invisible_format_characters_are_printed_as_escapes() {
+        assert_eq!(printable("a\u{2028}b\u{2029}c"), "a\\u{2028}b\\u{2029}c");
+        assert_eq!(printable("2.0\u{200b}.0"), "2.0\\u{200b}.0");
+        assert_eq!(printable("\u{feff}tool"), "\\u{feff}tool");
+        assert_eq!(printable("id\u{e0041}"), "id\\u{e0041}");
+        assert_eq!(printable("soft\u{ad}hyphen"), "soft\\u{ad}hyphen");
+        assert_eq!(printable("日本語 ✓"), "日本語 ✓");
     }
 
     #[test]
