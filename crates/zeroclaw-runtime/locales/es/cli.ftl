@@ -849,6 +849,7 @@ cli-plugin-update-usage-allow-item = '{$item}' no es un elemento de --allow: usa
 cli-plugin-update-checking = Buscando actualizaciones en el registro de complementos...
 cli-plugin-update-restored = Se restauró '{$name}' {$version}, que una actualización interrumpida había dejado desplazado.
 cli-plugin-update-updated = Se actualizó '{$name}' de {$from} a {$to}.
+cli-plugin-update-downgraded = Se reemplazó '{$name}' {$from} por {$to}, una versión anterior a la instalada.
 cli-plugin-update-reinstalled = Se reinstaló '{$name}' {$version}.
 cli-plugin-update-up-to-date = '{$name}' está al día ({$version}).
 cli-plugin-update-not-listed = Se omitió '{$name}': el registro no lo incluye.

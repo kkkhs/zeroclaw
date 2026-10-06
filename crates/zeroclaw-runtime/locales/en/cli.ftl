@@ -951,6 +951,7 @@ cli-plugin-update-usage-allow-item = '{$item}' is not an --allow item: use permi
 cli-plugin-update-checking = Checking the plugin registry for updates...
 cli-plugin-update-restored = Restored '{$name}' {$version}, which an interrupted update had left displaced.
 cli-plugin-update-updated = Updated '{$name}' from {$from} to {$to}.
+cli-plugin-update-downgraded = Replaced '{$name}' {$from} with {$to}, an older version than the one installed.
 cli-plugin-update-reinstalled = Reinstalled '{$name}' {$version}.
 cli-plugin-update-up-to-date = '{$name}' is up to date ({$version}).
 cli-plugin-update-not-listed = Skipped '{$name}': the registry does not list it.

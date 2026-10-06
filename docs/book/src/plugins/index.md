@@ -554,9 +554,11 @@ command is part of the registry lifecycle tracked in
 
 **Version selection.** A bare name takes the version `plugin install` would
 choose, the last entry the registry lists for that name, and `name@version`
-takes exactly that entry. ZeroClaw does not order version strings, so a
+takes exactly that entry. ZeroClaw does not order versions to choose one, so a
 selected version that differs from the installed one is installed even when it
-is older; pinning the version you had is how you go back. When the selected
+is older. When both are semantic versions and the new one is older, the result
+line says so instead of reporting an update. Pinning the version you had is how
+you go back. When the selected
 version is the installed one, the plugin is reported up to date and nothing is
 downloaded. A `--from` package always replaces the installed one, even at the
 same version, so a rebuilt plugin can be reinstalled without a version bump.

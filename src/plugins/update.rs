@@ -134,6 +134,22 @@ pub fn printable(text: &str) -> String {
     out
 }
 
+/// Whether `candidate` is an older version than `installed`, when both are
+/// semantic versions, by SemVer precedence: build metadata does not count, and
+/// a pre-release is older than its release. Update picks the version the
+/// registry lists without ordering versions, so this only reports a step back
+/// and never refuses one.
+#[must_use]
+pub fn is_older_version(candidate: &str, installed: &str) -> bool {
+    match (
+        semver::Version::parse(candidate),
+        semver::Version::parse(installed),
+    ) {
+        (Ok(candidate), Ok(installed)) => candidate.cmp_precedence(&installed).is_lt(),
+        _ => false,
+    }
+}
+
 /// Where a replacement comes from, as a printed update command names it.
 #[derive(Clone, Copy, Debug)]
 pub enum UpdateSource<'a> {
@@ -455,6 +471,17 @@ mod tests {
             local,
             "zeroclaw --config-dir '/cfg' plugin update 'weather' --from '/work/weather-plugin'"
         );
+    }
+
+    #[test]
+    fn an_older_version_is_one_lower_by_semver_precedence() {
+        assert!(is_older_version("1.2.5", "2.0.0"));
+        assert!(is_older_version("2.0.0-rc.1", "2.0.0"));
+        assert!(!is_older_version("2.0.0", "1.2.5"));
+        assert!(!is_older_version("2.0.0", "2.0.0"));
+        assert!(!is_older_version("2.0.0+build.1", "2.0.0+build.2"));
+        assert!(!is_older_version("nightly", "2.0.0"));
+        assert!(!is_older_version("1.0", "2.0.0"));
     }
 
     #[test]

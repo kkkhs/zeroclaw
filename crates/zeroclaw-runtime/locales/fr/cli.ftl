@@ -852,6 +852,7 @@ cli-plugin-update-usage-allow-item = '{$item}' n'est pas un élément de --allow
 cli-plugin-update-checking = Recherche de mises à jour dans le registre de plugins...
 cli-plugin-update-restored = '{$name}' {$version} a été remis en place ; une mise à jour interrompue l'avait laissé déplacé.
 cli-plugin-update-updated = '{$name}' mis à jour de {$from} vers {$to}.
+cli-plugin-update-downgraded = '{$name}' {$from} remplacé par {$to}, une version antérieure à celle qui était installée.
 cli-plugin-update-reinstalled = '{$name}' {$version} réinstallé.
 cli-plugin-update-up-to-date = '{$name}' est à jour ({$version}).
 cli-plugin-update-not-listed = '{$name}' ignoré : le registre ne le répertorie pas.

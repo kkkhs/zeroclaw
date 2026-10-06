@@ -847,6 +847,7 @@ cli-plugin-update-usage-allow-item = '{$item}' は --allow の項目ではあり
 cli-plugin-update-checking = プラグインレジストリで更新を確認しています...
 cli-plugin-update-restored = 中断された更新で退避されていた '{$name}' {$version} を元に戻しました。
 cli-plugin-update-updated = '{$name}' を {$from} から {$to} に更新しました。
+cli-plugin-update-downgraded = '{$name}' {$from} を、インストールされていたものより古い {$to} に置き換えました。
 cli-plugin-update-reinstalled = '{$name}' {$version} を再インストールしました。
 cli-plugin-update-up-to-date = '{$name}' は最新です ({$version})。
 cli-plugin-update-not-listed = '{$name}' をスキップしました: レジストリに掲載されていません。

@@ -848,6 +848,7 @@ cli-plugin-update-usage-allow-item = '{$item}' 不是 --allow 项：请使用 pe
 cli-plugin-update-checking = 正在插件注册表中检查更新...
 cli-plugin-update-restored = 已恢复 '{$name}' {$version}，它曾因一次中断的更新而处于移出状态。
 cli-plugin-update-updated = 已将 '{$name}' 从 {$from} 更新到 {$to}。
+cli-plugin-update-downgraded = 已将 '{$name}' {$from} 替换为 {$to}，这是比已安装版本更旧的版本。
 cli-plugin-update-reinstalled = 已重新安装 '{$name}' {$version}。
 cli-plugin-update-up-to-date = '{$name}' 已是最新版本（{$version}）。
 cli-plugin-update-not-listed = 已跳过 '{$name}'：注册表中没有它。

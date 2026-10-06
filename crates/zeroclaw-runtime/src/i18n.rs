@@ -1538,6 +1538,11 @@ mod tests {
                 &[NAME, "1.0.0", VERSION],
             ),
             (
+                "cli-plugin-update-downgraded",
+                &[("name", NAME), ("from", VERSION), ("to", "1.2.5")],
+                &[NAME, VERSION, "1.2.5"],
+            ),
+            (
                 "cli-plugin-update-reinstalled",
                 &[("name", NAME), ("version", VERSION)],
                 &[NAME, VERSION],
