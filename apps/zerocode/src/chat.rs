@@ -24,8 +24,8 @@ use crate::attachment::{
     CleanupReport, PendingAttachment, build_attachments_json, cleanup_attachment_temps,
 };
 use crate::client::{
-    ApprovalDecision, RpcClient, RpcNotification, SessionEntry, SessionStateResult, SessionUpdate,
-    TurnEndOutcome, method, parse_session_update,
+    ApprovalDecision, PlanPersistenceOperation, RpcClient, RpcNotification, SessionEntry,
+    SessionStateResult, SessionUpdate, TurnEndOutcome, method, parse_session_update,
 };
 use crate::diff;
 use crate::file_explorer::{ExplorerAction, FileExplorerState};
@@ -10901,7 +10901,8 @@ impl ChatState {
             | SessionUpdate::ContextUsage { session_id, .. }
             | SessionUpdate::HistoryTrimmed { session_id, .. }
             | SessionUpdate::TurnComplete { session_id, .. }
-            | SessionUpdate::Plan { session_id, .. } => session_id.as_str(),
+            | SessionUpdate::Plan { session_id, .. }
+            | SessionUpdate::PlanPersistence { session_id, .. } => session_id.as_str(),
         };
         if update_sid != self.session_id {
             return;
@@ -11158,6 +11159,25 @@ impl ChatState {
             // already enforced by the session_id check above.
             SessionUpdate::Plan { entries, .. } => {
                 self.todo_tracker.set_plan(entries);
+            }
+            SessionUpdate::PlanPersistence {
+                operation, status, ..
+            } => {
+                let key = match (operation, status) {
+                    (
+                        PlanPersistenceOperation::Load,
+                        crate::client::PlanPersistenceStatus::Unavailable,
+                    ) => "zc-chat-plan-persistence-load-unavailable",
+                    (
+                        PlanPersistenceOperation::Write,
+                        crate::client::PlanPersistenceStatus::Unavailable,
+                    ) => "zc-chat-plan-persistence-write-unavailable",
+                };
+                self.entries
+                    .push(ChatEntry::SystemMessage(Arc::<str>::from(crate::i18n::t(
+                        key,
+                    ))));
+                self.mark_dirty_append();
             }
         }
     }
@@ -24633,6 +24653,23 @@ mod tests {
                 if text.contains("history message limit exceeded")
                     && text.contains("4 older turns dropped")
                     && text.contains("3")
+        ));
+    }
+
+    #[test]
+    fn plan_persistence_update_adds_visible_system_notice() {
+        let mut s = state();
+        s.apply_update(SessionUpdate::PlanPersistence {
+            session_id: "sess-1".to_string(),
+            operation: PlanPersistenceOperation::Load,
+            status: crate::client::PlanPersistenceStatus::Unavailable,
+        });
+
+        assert!(matches!(
+            s.entries().last(),
+            Some(ChatEntry::SystemMessage(text))
+                if text.contains("TodoWrite plan storage is unavailable")
+                    && text.contains("No saved plan could be loaded")
         ));
     }
 
