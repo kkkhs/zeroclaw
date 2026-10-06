@@ -564,10 +564,10 @@ downloaded. A `--from` package always replaces the installed one, even at the
 same version, so a rebuilt plugin can be reinstalled without a version bump.
 
 **Verification.** A replacement passes the checks a new install does before
-the installed package or its configuration changes: the archive digest, the manifest's name and version
-against the registry entry, signature policy, the payload digest, the config
-schema, and the load check against this host's WIT world with your
-`plugins.limits`. Update has no `--no-verify`. To install a package that does
+the installed package or its configuration changes: the archive digest when
+the registry entry lists one, the manifest's name and version against the
+registry entry, signature policy, the payload digest, the config schema, and
+the load check against this host's WIT world with your `plugins.limits`. Update has no `--no-verify`. To install a package that does
 not load, remove the plugin and install it with `--no-verify`.
 
 **Added authority.** The host grants a plugin every permission its manifest
@@ -637,7 +637,7 @@ recovery works offline. The update then goes on as usual, so for a package you
 installed from a directory, add `--from` with that directory, or the
 registry's package of that name may replace it. `--all` only points at that
 command, so a displaced package is never put back unless you name it. A
-replaced version is marked superseded inside its transaction before it is
+replaced version is marked for deletion inside its transaction before it is
 deleted, so one that cannot be deleted is never put back: the warning names
 where it is, and the next update of the plugin deletes it. If even the marking
 fails, delete the directory the warning names by hand, because once the plugin
